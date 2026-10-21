@@ -22,6 +22,29 @@ Requirement references (`R1`–`R11`) follow the numbered sections of the assign
 
 Estimates are in hours and include implementation and self-review of each task.
 
+## Progress
+
+| Feature | Status | Notes |
+|---|---|---|
+| F0 | Done | Repository, solution, `global.json`, README skeleton, this plan |
+| F1 | Done (pending review) | Acceptance results below |
+| F2–F9 | Not started | |
+
+### F1 acceptance results
+
+| # | Check | Result |
+|---|---|---|
+| A1 | Solution build | Passed: 0 errors, 0 warnings |
+| A2 | No `DropDatabase` call in the code | Passed: 0 matches |
+| A3 | Seeder rejects a wrong database name, a non-local host, and SRV / replica set / load-balanced connection strings | Passed: all exit with an unhandled exception before any MongoDB call; no database created |
+| A4 | Seed 100,000 requests | Passed: 100,000 documents in 5.6–15.2 s across six runs, including index creation; the slower runs coincided with high memory pressure on the machine |
+| A5 | Consistency rules I1–I6 | Passed: 0 violations across 100,000 documents |
+| A6 | Non-uniform distribution | Passed: status Completed 35,036 / InProgress 30,134 / New 19,897 / Waiting 14,933; priority Low 40,169 / Medium 39,746 / High 20,085 |
+| A7 | Indexes | Passed: `_id` plus the 7 planned indexes; 19.37 MiB in total (2.45–2.57 MiB per B-tree index, 4.36 MiB for the text index). The collection's storage size was not yet reported correctly after the bulk load and will be re-measured in F7 |
+| A8 | Repeatability | Passed: identical counts, distributions and checksums (sum of `createdAt`, `updatedAt`, `version`) across two runs |
+| A9 | Normal startup, twice | Passed: indexes ensured idempotently; Swagger returned HTTP 200 on both runs |
+| A10 | Other databases untouched | Passed: user databases unchanged in size and document count. MongoDB's internal `config.system.sessions` changed, which is expected server behavior when a client connects |
+
 ---
 
 ## F0 — Planning and setup
@@ -40,7 +63,8 @@ Estimates are in hours and include implementation and self-review of each task.
 | T1.1 | Design the request document: fields, enum storage (priority as number for correct ordering), `version`, embedded status history | Document classes; model section in README | T0.1 | 1.5 | R0, R2, R3 |
 | T1.2 | MongoDB configuration: options, singleton client, DI registration | Configurable connection, no secrets in source | T1.1 | 1 | R10 |
 | T1.3 | Define indexes and create them at startup | Index initializer; index table in README | T1.1, T1.2 | 1.5 | R1, R6 |
-| T1.4 | Test data seeder: 100,000 records, fixed random seed, batched inserts, drop-and-recreate | Repeatable seeding command | T1.2 | 2 | R0 |
+| T1.4 | Test data seeder: 100,000 records, fixed random seed, batched inserts, drop-and-recreate | Repeatable seeding command | T1.2, T1.5 | 2 | R0 |
+| T1.5 | Allowed status transitions (moved from F4: the seeder generates history that must follow the same policy) | `StatusTransitions` policy | T1.1 | 1 | R2 |
 
 ## F2 — Query API
 
@@ -62,8 +86,7 @@ Estimates are in hours and include implementation and self-review of each task.
 
 | ID | Task | Deliverable | Depends on | Est. | Req |
 |---|---|---|---|---|---|
-| T4.1 | Allowed status transitions | Transition rules with unit tests | T1.1 | 1 | R2 |
-| T4.2 | Conditional atomic update: status, `updatedAt`, `version` increment and history entry in one operation; 404 / 409 / validation errors | `PATCH /api/requests/{id}/status` | T4.1, T2.4 | 3 | R2, R3 |
+| T4.2 | Conditional atomic update: status, `updatedAt`, `version` increment and history entry in one operation; 404 / 409 / validation errors | `PATCH /api/requests/{id}/status` | T1.5, T2.4 | 3 | R2, R3 |
 | T4.3 | History endpoint | `GET /api/requests/{id}/history` | T4.2 | 1 | R3 |
 
 ## F5 — Bulk update
@@ -145,10 +168,10 @@ flowchart LR
 | Feature | Est. (h) |
 |---|---|
 | F0 Planning and setup | 4 |
-| F1 Data layer | 6 |
+| F1 Data layer | 7 |
 | F2 Query API | 7.5 |
 | F3 Summary and cache | 3 |
-| F4 Status update and history | 5 |
+| F4 Status update and history | 4 |
 | F5 Bulk update | 3 |
 | F6 Automated tests | 7.5 |
 | F7 Performance | 3 |
