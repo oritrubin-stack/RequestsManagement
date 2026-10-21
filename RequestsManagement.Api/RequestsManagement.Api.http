@@ -1,6 +1,33 @@
 @RequestsManagement.Api_HostAddress = http://localhost:5114
 
-GET {{RequestsManagement.Api_HostAddress}}/weatherforecast/
+### First page, default sort (createdAt desc)
+GET {{RequestsManagement.Api_HostAddress}}/api/requests
 Accept: application/json
 
-###
+### Combined filters with a half-open date range [from, to) in UTC
+GET {{RequestsManagement.Api_HostAddress}}/api/requests?status=Waiting&priority=High&createdFrom=2025-01-01T00:00:00Z&createdTo=2025-07-01T00:00:00Z
+Accept: application/json
+
+### Free-text search (whole words in title and organization name)
+GET {{RequestsManagement.Api_HostAddress}}/api/requests?search=invoice&sortBy=updatedAt&sortDirection=desc
+Accept: application/json
+
+### Sort by priority, highest first (oldest first within the same priority)
+GET {{RequestsManagement.Api_HostAddress}}/api/requests?sortBy=priority&sortDirection=desc&page=2&pageSize=50
+Accept: application/json
+
+### Exact-match filters (case-sensitive)
+GET {{RequestsManagement.Api_HostAddress}}/api/requests?organizationName=Acme Logistics&assignedTo=noa.cohen
+Accept: application/json
+
+### Invalid parameters -> 400 ValidationProblemDetails
+GET {{RequestsManagement.Api_HostAddress}}/api/requests?pageSize=101&sortBy=title&status=Closed
+Accept: application/json
+
+### Get by id (replace with an existing id) -> 200 or 404
+GET {{RequestsManagement.Api_HostAddress}}/api/requests/000000000000000000000000
+Accept: application/json
+
+### Invalid id format -> 400
+GET {{RequestsManagement.Api_HostAddress}}/api/requests/not-an-id
+Accept: application/json

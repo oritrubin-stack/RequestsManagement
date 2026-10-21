@@ -27,8 +27,18 @@ Estimates are in hours and include implementation and self-review of each task.
 | Feature | Status | Notes |
 |---|---|---|
 | F0 | Done | Repository, solution, `global.json`, README skeleton, this plan |
-| F1 | Done (pending review) | Acceptance results below |
-| F2–F9 | Not started | |
+| F1 | Done | Acceptance results below |
+| F2 | Done (pending review) | API implemented; 25/25 manual checks; 48/48 automated tests. Test tasks T6.1–T6.2 were done here, alongside the API |
+| F3–F9 | Not started | |
+
+### F2 results
+
+| Check | Result |
+|---|---|
+| Manual checks against 100,000 records | 25/25 passed; result counts matched direct MongoDB counts |
+| Automated tests (`dotnet test`) | 48/48 passed in two consecutive runs (unit + integration against MongoDB, including the real 503 path) |
+| Test database cleanup | The test database was dropped after each run; no other database changed |
+| Defects found by the tests and fixed | `[Produces("application/json")]` overrode the `application/problem+json` content type of 400/404 responses; 500/503 responses had no `traceId` |
 
 ### F1 acceptance results
 

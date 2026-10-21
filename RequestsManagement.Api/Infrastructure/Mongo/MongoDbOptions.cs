@@ -11,4 +11,7 @@ public sealed class MongoDbOptions
 
     [Required]
     public string DatabaseName { get; set; } = string.Empty;
+
+    // When false, the API starts without contacting MongoDB (indexes are then expected to exist already).
+    public bool EnsureIndexesOnStartup { get; set; } = true;
 }

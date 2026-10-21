@@ -52,7 +52,13 @@ public sealed class RequestDataSeeder
                 $"Seeding is allowed only for the database '{AllowedDatabaseName}'.");
         }
 
-        var url = MongoUrl.Create(options.ConnectionString);
+        EnsureLocalServer(options.ConnectionString);
+    }
+
+    // Shared with the integration test fixture, which applies the same rule before creating or dropping a test database.
+    public static void EnsureLocalServer(string connectionString)
+    {
+        var url = MongoUrl.Create(connectionString);
 
         // SRV, replica set and load-balanced modes let the driver connect to servers other than the listed hosts,
         // so they are rejected to keep the listed local host the only possible target.

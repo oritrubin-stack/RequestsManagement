@@ -40,7 +40,8 @@ public static class MongoServiceCollectionExtensions
     }
 
     // Conventions are global to the BSON serializer, so they are registered once and limited to our domain types.
-    private static void RegisterConventions()
+    // They must be registered before a domain type is first serialized, because the driver freezes its class map then.
+    public static void RegisterConventions()
     {
         if (Interlocked.Exchange(ref _conventionsRegistered, 1) == 1)
         {

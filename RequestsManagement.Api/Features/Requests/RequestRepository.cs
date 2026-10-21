@@ -1,0 +1,122 @@
+using MongoDB.Bson;
+using MongoDB.Driver;
+using RequestsManagement.Api.Domain;
+using RequestsManagement.Api.Features.Requests.Dtos;
+using SortDirection = RequestsManagement.Api.Features.Requests.Dtos.SortDirection;
+
+namespace RequestsManagement.Api.Features.Requests;
+
+// Filtering, sorting, paging and counting are all executed by MongoDB; only one page of documents,
+// without their status history, is transferred to the application.
+public sealed class RequestRepository : IRequestRepository
+{
+    private static readonly FilterDefinitionBuilder<RequestDocument> Filter = Builders<RequestDocument>.Filter;
+    private static readonly SortDefinitionBuilder<RequestDocument> Sort = Builders<RequestDocument>.Sort;
+
+    private static readonly ProjectionDefinition<RequestDocument> WithoutHistory =
+        Builders<RequestDocument>.Projection.Exclude(x => x.StatusHistory);
+
+    private readonly IMongoCollection<RequestDocument> _collection;
+
+    public RequestRepository(IMongoCollection<RequestDocument> collection)
+    {
+        _collection = collection;
+    }
+
+    public async Task<RequestSearchResult> SearchAsync(RequestQueryParameters query, CancellationToken cancellationToken)
+    {
+        var filters = BuildFilters(query);
+        var filter = filters.Count == 0 ? Filter.Empty : Filter.And(filters);
+
+        var itemsTask = _collection
+            .Find(filter)
+            .Project<RequestDocument>(WithoutHistory)
+            .Sort(BuildSort(query.SortBy, query.SortDirection))
+            .Skip((query.Page - 1) * query.PageSize)
+            .Limit(query.PageSize)
+            .ToListAsync(cancellationToken);
+
+        // An unfiltered countDocuments scans the whole collection (measured ~200 ms on 100K documents),
+        // while the estimated count reads collection metadata.
+        var countTask = filters.Count == 0
+            ? _collection.EstimatedDocumentCountAsync(cancellationToken: cancellationToken)
+            : _collection.CountDocumentsAsync(filter, cancellationToken: cancellationToken);
+
+        await Task.WhenAll(itemsTask, countTask);
+
+        return new RequestSearchResult(itemsTask.Result, countTask.Result);
+    }
+
+    public async Task<RequestDocument?> GetByIdAsync(ObjectId id, CancellationToken cancellationToken) =>
+        await _collection
+            .Find(Filter.Eq(x => x.Id, id))
+            .Project<RequestDocument>(WithoutHistory)
+            .FirstOrDefaultAsync(cancellationToken);
+
+    private static List<FilterDefinition<RequestDocument>> BuildFilters(RequestQueryParameters query)
+    {
+        var filters = new List<FilterDefinition<RequestDocument>>();
+
+        if (!string.IsNullOrWhiteSpace(query.Search))
+        {
+            filters.Add(Filter.Text(query.Search.Trim()));
+        }
+
+        if (query.Status is { } status)
+        {
+            filters.Add(Filter.Eq(x => x.Status, status));
+        }
+
+        if (query.Priority is { } priority)
+        {
+            filters.Add(Filter.Eq(x => x.Priority, priority));
+        }
+
+        if (!string.IsNullOrEmpty(query.OrganizationName))
+        {
+            filters.Add(Filter.Eq(x => x.OrganizationName, query.OrganizationName));
+        }
+
+        if (!string.IsNullOrEmpty(query.AssignedTo))
+        {
+            filters.Add(Filter.Eq(x => x.AssignedTo, query.AssignedTo));
+        }
+
+        if (query.CreatedFromUtc is { } from)
+        {
+            filters.Add(Filter.Gte(x => x.CreatedAt, from));
+        }
+
+        if (query.CreatedToUtc is { } to)
+        {
+            filters.Add(Filter.Lt(x => x.CreatedAt, to));
+        }
+
+        return filters;
+    }
+
+    // Every sort ends with _id for stable pagination, and its key directions match an index
+    // (or its exact reverse) so MongoDB can return the page in index order without an in-memory sort.
+    private static SortDefinition<RequestDocument> BuildSort(RequestSortField field, SortDirection direction)
+    {
+        var ascending = direction == SortDirection.Asc;
+
+        return field switch
+        {
+            RequestSortField.UpdatedAt => ascending
+                ? Sort.Ascending(x => x.UpdatedAt).Ascending(x => x.Id)
+                : Sort.Descending(x => x.UpdatedAt).Descending(x => x.Id),
+
+            // Index ix_priority_createdAt_id is (priority 1, createdAt -1, _id -1). A descending priority sort
+            // must therefore order createdAt ascending (oldest first); a mismatched direction was measured
+            // as a collection scan with an in-memory sort (~330 ms on 100K documents).
+            RequestSortField.Priority => ascending
+                ? Sort.Ascending(x => x.Priority).Descending(x => x.CreatedAt).Descending(x => x.Id)
+                : Sort.Descending(x => x.Priority).Ascending(x => x.CreatedAt).Ascending(x => x.Id),
+
+            _ => ascending
+                ? Sort.Ascending(x => x.CreatedAt).Ascending(x => x.Id)
+                : Sort.Descending(x => x.CreatedAt).Descending(x => x.Id)
+        };
+    }
+}

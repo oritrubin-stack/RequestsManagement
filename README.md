@@ -35,6 +35,7 @@ official [compatibility tables](https://www.mongodb.com/docs/drivers/compatibili
 |---|---|---|
 | `MongoDb:ConnectionString` | `mongodb://localhost:27017` | `appsettings.Development.json` (no credentials) |
 | `MongoDb:DatabaseName` | `RequestsManagement` | `appsettings.json` |
+| `MongoDb:EnsureIndexesOnStartup` | `true` | When `false`, the API starts without contacting MongoDB (the indexes must already exist) |
 
 Both can be overridden with environment variables, for example `MongoDb__ConnectionString`.
 Outside the Development environment no connection string is provided, and the API fails at startup until one is configured.
@@ -73,13 +74,21 @@ On startup the API ensures that all indexes exist. This is idempotent.
 ```
 RequestsManagement.Api/
 ├── Domain/                     # Request document, status/priority enums, status transition policy
+├── Features/
+│   └── Requests/               # Controller (HTTP), service (mapping, business rules), repository (MongoDB queries), DTOs
 ├── Infrastructure/
+│   ├── ErrorHandling/          # Global exception handler (ProblemDetails)
 │   ├── Mongo/                  # Options, DI registration, index definitions
 │   └── Seeding/                # Deterministic data generator and the seeder
 └── Program.cs                  # Composition root; normal startup or the --seed path
+
+RequestsManagement.Api.Tests/
+├── Infrastructure/             # WebApplicationFactory, MongoDB test database fixture
+├── Integration/                # HTTP tests against the real API and MongoDB
+└── Unit/                       # Domain rules, query parameter validation, data generator
 ```
 
-_TBD_ — API, tests and client projects.
+_TBD_ — client project.
 
 ## Database choice and data model
 
@@ -153,7 +162,103 @@ No additional index is added without a measured justification.
 
 ## Querying: pagination, filtering, sorting and search
 
-_TBD_ — how loading the full data set into memory is avoided.
+### `GET /api/requests`
+
+| Parameter | Type | Default | Rules |
+|---|---|---|---|
+| `search` | string | — | Up to 100 characters; MongoDB `$text` search on `title` and `organizationName` |
+| `status` | `New` \| `InProgress` \| `Waiting` \| `Completed` | — | Single value |
+| `priority` | `Low` \| `Medium` \| `High` | — | Single value |
+| `organizationName` | string | — | Exact, **case-sensitive** match; up to 200 characters |
+| `assignedTo` | string | — | Exact, case-sensitive match; up to 200 characters |
+| `createdFrom` | date-time | — | Inclusive lower bound of `createdAt` |
+| `createdTo` | date-time | — | Exclusive upper bound of `createdAt`; must be later than `createdFrom` |
+| `sortBy` | `createdAt` \| `updatedAt` \| `priority` | `createdAt` | |
+| `sortDirection` | `asc` \| `desc` | `desc` | |
+| `page` | int | 1 | 1 – 1,000,000 |
+| `pageSize` | int | 20 | 1 – 100 |
+
+- **Dates:** the date range is half-open, `[createdFrom, createdTo)`, and all dates are UTC. A value without an offset
+  (for example `2025-01-01`) is interpreted as UTC.
+- **Sorting by priority:** see [Sorting by priority](#sorting-by-priority) below.
+- **Response:** `{ items, page, pageSize, totalCount, totalPages }`.
+  Items are `RequestDto` objects without the status history, and enums are returned as strings.
+
+### Sorting by priority
+
+| `sortDirection` | Order |
+|---|---|
+| `desc` | `High` first. Within the same priority, the **oldest** request comes first |
+| `asc` | `Low` first. Within the same priority, the **newest** request comes first |
+
+**This behavior is intentional.** The reasons:
+
+- **One index serves both directions.** The index `ix_priority_createdAt_id` is `(priority 1, createdAt -1, _id -1)`.
+  MongoDB can read an index forwards or backwards, but only with every key reversed together.
+  A descending priority sort can therefore use the index only if `createdAt` becomes ascending.
+- **Measured cost of the alternative.** Sorting by `priority` descending with `createdAt` also descending does not match the
+  index. It was measured as a full collection scan with an in-memory sort: 100,000 documents examined, 333 ms.
+  The index-aligned order examines 20 keys and 20 documents, 18 ms.
+- **It matches a work queue.** In the most common use, "most urgent first", the high-priority request that has waited longest
+  is shown first.
+
+**Alternatives considered:**
+- **Reverse `createdAt` in the index** (`priority 1, createdAt 1, _id 1`). This only moves the asymmetry:
+  a descending sort would show the newest `High` first, and an ascending sort the oldest `Low` first.
+- **Add a second index** so that both directions sort newest first. This adds write and storage cost to every insert
+  and status update, without a measured need.
+
+### `GET /api/requests/{id}`
+
+Returns `200` with a `RequestDto`, `404` if the request does not exist, or `400` if the id is not a valid ObjectId.
+
+### Avoiding loading the data set into memory
+
+- **Filtering, `$text` search, sorting, skip/limit and counting run in MongoDB.** The application receives one page only.
+- **A projection excludes `statusHistory`,** so list queries transfer only the fields the DTO needs.
+- **The page items and the total count are queried in parallel.** Without filters, the count uses the collection metadata
+  (`estimatedDocumentCount`) instead of scanning, because an unfiltered `countDocuments` was measured at about 200 ms.
+
+### Errors
+
+All errors are returned as ProblemDetails (`application/problem+json`) with a `traceId`:
+
+| Status | When |
+|---|---|
+| `400` | Invalid query parameters or id (`ValidationProblemDetails` with an error per field) |
+| `404` | The request does not exist |
+| `503` | MongoDB is unreachable (server selection timeout or connection failure) |
+| `500` | Any other unexpected error; details are logged, not returned |
+
+If the client disconnects, the request is cancelled through the `CancellationToken` and logged at Information level.
+Logs include the names of active filters, result counts and timings. Search text and filter values are not logged.
+
+### Indexes and query plans
+
+Query plans for the main query shapes, measured with `explain("executionStats")` on 100,000 documents with a page size of 20:
+
+| Query | Plan | In-memory sort | Keys / docs examined | ms |
+|---|---|---|---|---|
+| No filter, `createdAt` desc or asc | `IXSCAN ix_createdAt_id` | No | 20 / 20 | 0–29 |
+| `status` (+ date range), `createdAt` desc | `IXSCAN ix_status_createdAt_id` | No | 20 / 20 | 4–31 |
+| `status`, sorted by `updatedAt` | `IXSCAN ix_updatedAt_id`, status filtered while scanning | No | 87 / 87 | 21 |
+| Sorted by `priority` (index-aligned directions) | `IXSCAN ix_priority_createdAt_id` | No | 20 / 20 | 18 |
+| Sorted by `priority` with **mismatched** secondary directions | `COLLSCAN` + `SORT` | **Yes** | 0 / 100,000 | 333 |
+| `status`, sorted by `priority` | `IXSCAN ix_priority_createdAt_id` | No | 91 / 91 | 2 |
+| `organizationName` or `assignedTo` (+ `status`) | `IXSCAN` on the matching index | No | 20–69 | 23–28 |
+| `$text` (+ `status`), any sort | `TEXT` + `SORT` | **Yes** | 4,922–6,719 | 46–121 |
+| `organizationName` + `priority`, sorted by `updatedAt` | `IXSCAN ix_organizationName_createdAt_id` + `SORT` | Yes (478 docs) | 478 / 478 | 11 |
+| Skip 50,000 | `IXSCAN` + `SKIP` | No | 50,020 / 20 | 139 |
+
+**Conclusions:**
+- **Sorting by priority:** the secondary sort keys follow `ix_priority_createdAt_id` or its exact reverse. A mismatched direction
+  turns the query into a full collection scan.
+- **`$text` cannot use another index for sorting,** so matching documents are sorted in memory. The cost grows with the number
+  of matches. At 100,000 documents, even the whole collection (about 40 MB) fits within MongoDB's 100 MB in-memory sort limit.
+- **A filter combined with a different sort field** uses either the filter index or the sort index; the planner chooses.
+  This is acceptable for the measured shapes, and is re-checked in the performance phase.
+- **Deep pages are expensive:** skip scans every skipped key (a skip beyond the last page scanned the whole index, about 320 ms).
+  Keyset pagination is the documented improvement.
 
 ## Status updates and concurrency
 
@@ -177,7 +282,46 @@ _TBD_ — see `docs/performance.md`.
 
 ## Testing
 
-_TBD_
+```bash
+dotnet test RequestsManagement.sln
+```
+
+The tests require a local MongoDB server on `localhost:27017`.
+
+| Package | Version |
+|---|---|
+| xunit | 2.9.3 |
+| xunit.runner.visualstudio | 3.1.5 |
+| Microsoft.NET.Test.Sdk | 18.11.0 |
+| Microsoft.AspNetCore.Mvc.Testing | 8.0.32 |
+
+### Integration tests (real API and real MongoDB)
+
+The tests host the real API in memory with `WebApplicationFactory`, so nothing in the request pipeline is replaced.
+Expected results are computed in memory from the same 500 seeded documents and compared with the HTTP responses.
+
+| Test class | Covers |
+|---|---|
+| `RequestsQueryTests` | Default sort; combined filters; half-open UTC date range; sorting by priority and by `updatedAt`; all pages contain every result exactly once; a page beyond the end; `$text` whole-word search (and no partial-word match); exact, case-sensitive organization filter; get by id (`200`, `404`) |
+| `RequestsValidationTests` | `400` with a field error for every invalid query parameter, too-long search text and malformed ids |
+| `DatabaseUnavailableTests` | `503` ProblemDetails when MongoDB is unreachable. This uses the real failure path: the driver's server selection times out on an unused local port, and the global handler maps the exception to 503 |
+
+**Test database safety.** Each run uses a new database named `RequestsManagement_Tests_<guid>` on the local server.
+The database is dropped at the end only when all of the following hold:
+- the name has this prefix;
+- the server is local (the same check the seeder uses);
+- the name did not exist before the run;
+- the marker document written by this run is still present.
+
+Otherwise the database is left in place and a message is written.
+
+### Unit tests
+
+| Test class | Covers |
+|---|---|
+| `StatusTransitionsTests` | Allowed and disallowed transitions; `Completed` is final |
+| `RequestQueryParametersTests` | Defaults; UTC normalization of dates without an offset and of local dates; range comparison after normalization |
+| `RequestDataGeneratorTests` | Determinism for a given seed; generated documents satisfy the consistency rules |
 
 ## Technical decisions and alternatives
 
@@ -202,6 +346,10 @@ _TBD_ — `ChangedBy` source.
 
 ## Known limitations and possible improvements
 
+- **The `organizationName` filter is an exact, case-sensitive match** (`acme logistics` does not find `Acme Logistics`).
+  Use `search` to find organizations by word. A case-insensitive filter would require a collation index.
+- **Search terms are combined with OR** (`invoice payroll` matches either word), following MongoDB `$text` semantics.
+  Quoted phrases and `-term` exclusions are also passed through to `$text`.
 - **Text search matches whole words only.** `$text` does not match partial words (`Acm` does not find `Acme`).
   With `default_language: none` there is no stemming (`request` does not find `requests`).
   In Hebrew, attached prefixes are not separated (`בקשה` does not find `הבקשה`). The seeded data is in English.

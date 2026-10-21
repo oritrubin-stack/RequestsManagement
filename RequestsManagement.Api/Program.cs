@@ -1,3 +1,7 @@
+using System.Text.Json.Serialization;
+using Microsoft.Extensions.Options;
+using RequestsManagement.Api.Features.Requests;
+using RequestsManagement.Api.Infrastructure.ErrorHandling;
 using RequestsManagement.Api.Infrastructure.Mongo;
 using RequestsManagement.Api.Infrastructure.Seeding;
 
@@ -8,10 +12,22 @@ var seedRequested = args.Contains(SeedArgument);
 var builder = WebApplication.CreateBuilder(args.Where(arg => arg != SeedArgument).ToArray());
 
 // Add services to the container.
+builder.Services
+    .AddControllers()
+    .AddJsonOptions(options => options.JsonSerializerOptions.Converters.Add(new JsonStringEnumConverter()));
+
+builder.Services.AddProblemDetails();
+builder.Services.AddExceptionHandler<GlobalExceptionHandler>();
+
 // Learn more about configuring Swagger/OpenAPI at https://aka.ms/aspnetcore/swashbuckle
 builder.Services.AddEndpointsApiExplorer();
 builder.Services.AddSwaggerGen();
+
 builder.Services.AddMongoDb(builder.Configuration);
+
+// Stateless request-scoped services; the MongoDB client and collection they use are singletons.
+builder.Services.AddScoped<IRequestRepository, RequestRepository>();
+builder.Services.AddScoped<RequestService>();
 
 var app = builder.Build();
 
@@ -22,9 +38,14 @@ if (seedRequested)
     return;
 }
 
-await app.Services.GetRequiredService<RequestIndexes>().EnsureIndexesAsync(CancellationToken.None);
+if (app.Services.GetRequiredService<IOptions<MongoDbOptions>>().Value.EnsureIndexesOnStartup)
+{
+    await app.Services.GetRequiredService<RequestIndexes>().EnsureIndexesAsync(CancellationToken.None);
+}
 
 // Configure the HTTP request pipeline.
+app.UseExceptionHandler();
+
 if (app.Environment.IsDevelopment())
 {
     app.UseSwagger();
@@ -33,29 +54,9 @@ if (app.Environment.IsDevelopment())
 
 app.UseHttpsRedirection();
 
-var summaries = new[]
-{
-    "Freezing", "Bracing", "Chilly", "Cool", "Mild", "Warm", "Balmy", "Hot", "Sweltering", "Scorching"
-};
-
-app.MapGet("/weatherforecast", () =>
-{
-    var forecast =  Enumerable.Range(1, 5).Select(index =>
-        new WeatherForecast
-        (
-            DateOnly.FromDateTime(DateTime.Now.AddDays(index)),
-            Random.Shared.Next(-20, 55),
-            summaries[Random.Shared.Next(summaries.Length)]
-        ))
-        .ToArray();
-    return forecast;
-})
-.WithName("GetWeatherForecast")
-.WithOpenApi();
+app.MapControllers();
 
 app.Run();
 
-record WeatherForecast(DateOnly Date, int TemperatureC, string? Summary)
-{
-    public int TemperatureF => 32 + (int)(TemperatureC / 0.5556);
-}
+// Exposes the entry point to WebApplicationFactory in the integration tests.
+public partial class Program { }
