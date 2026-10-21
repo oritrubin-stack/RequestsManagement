@@ -29,8 +29,18 @@ Estimates are in hours and include implementation and self-review of each task.
 | F0 | Done | Repository, solution, `global.json`, README skeleton, this plan |
 | F1 | Done | Acceptance results below |
 | F2 | Done | API implemented; 25/25 manual checks; 48/48 automated tests. Test tasks T6.1–T6.2 were done here, alongside the API |
-| F3 | Done (pending review) | Summary endpoint and cache; 67/67 automated tests. Cache tests (part of T6.4) were done here |
-| F4–F9 | Not started | |
+| F3 | Done | Summary endpoint and cache; 67/67 automated tests. Cache tests (part of T6.4) were done here |
+| F4 | Done (pending review) | Status update with optimistic concurrency, history endpoint; 109/109 automated tests. Update tests (part of T6.3) were done here |
+| F5–F9 | Not started | |
+
+### F4 results
+
+| Check | Result |
+|---|---|
+| Automated tests (`dotnet test`) | 109/109 passed (42 new): every update outcome, including writes with an unknown outcome (unit), and success, transitions, `409`, `404`, validation messages, history, cache invalidation and `503` against MongoDB (integration) |
+| Concurrency | 10 concurrent updates with the same version: exactly one `200` and nine `409`; version +1 and one history entry. In the recorded runs, 2–3 conflicts were rejected by the atomic condition itself and the rest by the early version check; the split varies between runs |
+| Version condition is essential | With the version removed from the update filter (temporary mutation), both the concurrency test and the repository test fail; the restored file is identical |
+| Main database | Not written to. History and Swagger were checked read-only; the database matches the F1 baseline |
 
 ### F3 results
 
@@ -114,8 +124,11 @@ Estimates are in hours and include implementation and self-review of each task.
 
 | ID | Task | Deliverable | Depends on | Est. | Req |
 |---|---|---|---|---|---|
-| T4.2 | Conditional atomic update: status, `updatedAt`, `version` increment and history entry in one operation; 404 / 409 / validation errors; invalidate the summary cache after a successful update | `PATCH /api/requests/{id}/status` | T1.5, T2.4, T3.2 | 3 | R2, R3, R7 |
+| T4.1 | DTOs, `StatusUpdateResult` (an outcome value reusable by the bulk update), history mapping | Contracts | T1.1 | 0.5 | R2, R3 |
+| T4.2 | Conditional atomic update: status, `updatedAt`, `version` increment and history entry in one operation; 404 / 409 / validation errors; invalidate the summary cache after a successful update | `PUT /api/requests/{id}/status` (changed from `PATCH`: the status sub-resource is replaced) | T4.1, T1.5, T2.4, T3.2 | 3.5 | R2, R3, R7 |
 | T4.3 | History endpoint | `GET /api/requests/{id}/history` | T4.2 | 1 | R3 |
+| T4.4 | Tests: unit tests for every outcome including the read/write race; integration tests in a separate write database, including 10 concurrent updates | Passing tests | T4.2, T4.3 | 1.5 | R2, R3, R8 |
+| T4.5 | Documentation: update contract, concurrency, history, `ChangedBy` source | README sections | T4.4 | 0.5 | R11 |
 
 ## F5 — Bulk update
 
@@ -199,10 +212,10 @@ flowchart LR
 | F1 Data layer | 7 |
 | F2 Query API | 7.5 |
 | F3 Summary and cache | 8 |
-| F4 Status update and history | 4 |
+| F4 Status update and history | 7 |
 | F5 Bulk update | 3 |
 | F6 Automated tests | 7.5 |
 | F7 Performance | 3 |
 | F8 Angular client | 14.5 |
 | F9 Documentation and submission | 5 |
-| **Total** | **63.5** |
+| **Total** | **66.5** |

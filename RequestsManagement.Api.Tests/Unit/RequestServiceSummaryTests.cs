@@ -52,7 +52,7 @@ public sealed class RequestServiceSummaryTests
             Options.Create(new RequestSummaryCacheOptions()),
             NullLogger<RequestSummaryCache>.Instance);
 
-        return new RequestService(new SummaryOnlyRepository(counts), cache, NullLogger<RequestService>.Instance);
+        return new RequestService(new SummaryOnlyRepository(counts), cache, TimeProvider.System, NullLogger<RequestService>.Instance);
     }
 
     private sealed class SummaryOnlyRepository : IRequestRepository
@@ -70,6 +70,16 @@ public sealed class RequestServiceSummaryTests
             throw new NotSupportedException();
 
         public Task<RequestDocument?> GetByIdAsync(ObjectId id, CancellationToken cancellationToken) =>
+            throw new NotSupportedException();
+
+        public Task<RequestDocument?> TryUpdateStatusAsync(
+            ObjectId id,
+            int expectedVersion,
+            StatusChangeEntry change,
+            CancellationToken cancellationToken) =>
+            throw new NotSupportedException();
+
+        public Task<IReadOnlyList<StatusChangeEntry>?> GetHistoryAsync(ObjectId id, CancellationToken cancellationToken) =>
             throw new NotSupportedException();
     }
 }

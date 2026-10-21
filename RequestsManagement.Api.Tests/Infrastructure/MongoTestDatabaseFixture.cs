@@ -144,3 +144,11 @@ public sealed class MongoIntegrationCollection : ICollectionFixture<MongoTestDat
 {
     public const string Name = "MongoDB integration";
 }
+
+// Tests that modify data use their own fixture instance, and therefore their own test database,
+// so the read-only tests can keep comparing against the seeded documents.
+[CollectionDefinition(Name)]
+public sealed class MongoWriteIntegrationCollection : ICollectionFixture<MongoTestDatabaseFixture>
+{
+    public const string Name = "MongoDB write integration";
+}

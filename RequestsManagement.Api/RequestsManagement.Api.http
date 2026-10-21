@@ -28,6 +28,17 @@ Accept: application/json
 GET {{RequestsManagement.Api_HostAddress}}/api/requests/summary
 Accept: application/json
 
+### Change status (replace id and expectedVersion with current values) -> 200, 400, 404 or 409
+PUT {{RequestsManagement.Api_HostAddress}}/api/requests/000000000000000000000000/status
+X-User-Name: dana.cohen
+Content-Type: application/json
+
+{ "status": "InProgress", "expectedVersion": 1 }
+
+### Status change history -> 200 (array, empty when there are no changes) or 404
+GET {{RequestsManagement.Api_HostAddress}}/api/requests/000000000000000000000000/history
+Accept: application/json
+
 ### Get by id (replace with an existing id) -> 200 or 404
 GET {{RequestsManagement.Api_HostAddress}}/api/requests/000000000000000000000000
 Accept: application/json

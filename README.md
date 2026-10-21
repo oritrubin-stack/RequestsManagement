@@ -266,11 +266,105 @@ Query plans for the main query shapes, measured with `explain("executionStats")`
 
 ## Status updates and concurrency
 
-_TBD_ — optimistic concurrency with a `version` field and a conditional atomic update.
+### `PUT /api/requests/{id}/status`
+
+```http
+PUT /api/requests/6ad881e1a051e7edd89d0ef0/status
+X-User-Name: dana.cohen
+Content-Type: application/json
+
+{ "status": "InProgress", "expectedVersion": 3 }
+```
+
+| Field | Rules |
+|---|---|
+| `status` | Required; one of `New`, `InProgress`, `Waiting`, `Completed` |
+| `expectedVersion` | Required; at least 1. The `version` the client last read |
+| `X-User-Name` header | Required; 1–100 characters from letters, digits and `. _ @ -`. Recorded as `changedBy` in the history |
+
+| Status | When | Body |
+|---|---|---|
+| `200` | The status was changed | The updated `RequestDto`, with the new `version` and `updatedAt` |
+| `400` | Invalid id, body or header; a transition the policy does not allow, or the current status | `ValidationProblemDetails` (for a transition, under `errors.Status`) |
+| `404` | The request does not exist | `ProblemDetails` |
+| `409` | `expectedVersion` is not the current version | `ProblemDetails` with `currentVersion` and `currentStatus` |
+| `503` | MongoDB is unreachable | `ProblemDetails` |
+
+**Why `expectedVersion` is in the body and not an `If-Match` header:** a failed `If-Match` precondition is
+`412 Precondition Failed` by HTTP semantics, while the assignment requires `409 Conflict` for a concurrent update.
+
+**Why a disallowed transition is `400` and not `409`:** clients treat `409` as "reload and retry".
+A disallowed transition does not go away after a reload, so it is reported as a validation error.
+
+### How a lost update is prevented
+
+1. **Read** the request. If it does not exist, return `404`.
+2. **Check the version.** If `expectedVersion` differs from the stored `version`, return `409`. This comes before
+   the transition check, because a transition judged against a state the client has not seen is meaningless.
+3. **Check the transition** against the policy. If it is not allowed, return `400`.
+4. **Conditional atomic update** (`findOneAndUpdate`):
+
+   ```js
+   filter: { _id: id, version: expectedVersion }
+   update: { $set:  { status: newStatus, updatedAt: now },
+             $inc:  { version: 1 },
+             $push: { statusHistory: { previousStatus, newStatus, changedAt: now, changedBy } } }
+   ```
+
+5. **If nothing matched,** another update won between steps 1 and 4. The request is read again:
+   it returns `404` if the request is gone, and `409` with the current version otherwise.
+
+**Correctness rests on step 4, not on the read.** A single-document update is atomic in MongoDB, and the version
+condition is evaluated inside it. Of two updates based on the same version, only the first can match, and the
+second receives `409`. The status, `updatedAt`, `version` and the history entry are written in the same operation,
+so the consistency rules above always hold, and no transaction (or replica set) is needed.
+`previousStatus` comes from the read in step 1. It is accurate whenever the update matches, because any status
+change would also have changed the version.
+
+**Timestamps:** `updatedAt` and `changedAt` are the same value, truncated to milliseconds (the precision MongoDB stores).
+The value is never earlier than the previous `updatedAt`, so the history stays in order even if server clocks differ.
+
+**Cache:** the summary cache is invalidated after the update succeeds, and when its outcome is unknown (see below).
+It is not invalidated for `400`, `404` or `409`, which are definite failures.
+
+**Measured in the tests:** 10 concurrent requests with the same `expectedVersion` produce exactly one `200` and
+nine `409` responses; the version increases by one and one history entry is added. In the recorded runs, 2–3 of the 9
+conflicts were rejected by the atomic condition itself (after passing the early version check) and the rest by the
+early check; the split varies between runs.
+
+### When the outcome of an update is unknown
+
+Once the update command has been sent, MongoDB applies it even if the client stops waiting: the driver closes the
+connection on cancellation or a network failure, but it does not stop the command on the server. Therefore:
+
+- **If the client disconnects** while the update is in flight, the request is cancelled (`499`, logged only).
+- **If the reply is lost** (timeout or connection failure), the API returns `503`. **The update may or may not have
+  been applied.** The response does not claim either outcome.
+- **The summary cache is invalidated in both cases,** because the counts may have changed. This costs at most one
+  extra computation. If the server applies the update only after the API stopped waiting, a summary computed in
+  between can still be cached with the previous counts until the TTL expires (30 seconds).
+- **The API does not retry.** A client may reload the request: if `version` increased, the update was applied.
+  A client may also resend the same update with the same `expectedVersion`, which is safe: it either succeeds once
+  or returns `409` if the first attempt was applied.
 
 ## Status change history (audit)
 
-_TBD_
+### `GET /api/requests/{id}/history`
+
+```json
+[
+  { "requestId": "6ad881e1a051e7edd89d0ef0", "previousStatus": "New", "newStatus": "InProgress",
+    "changedAt": "2025-05-27T10:50:46.075Z", "changedBy": "dana.biton" },
+  { "requestId": "6ad881e1a051e7edd89d0ef0", "previousStatus": "InProgress", "newStatus": "Completed",
+    "changedAt": "2025-05-31T14:46:43.665Z", "changedBy": "maya.peretz" }
+]
+```
+
+- **Order:** chronological, oldest first, as stored.
+- **Responses:** an empty array for a request without status changes, `404` for an unknown request, and `400` for an invalid id.
+- **Storage:** the history is embedded in the request document and written in the same update as the status change,
+  so a change can never be saved without its audit entry. `requestId` is taken from the parent document.
+- **No paging:** the number of entries is bounded by the number of status changes of a single request.
 
 ## Bulk status update
 
@@ -334,7 +428,7 @@ A single aggregation pipeline runs in MongoDB:
 | **What is cached** | Only the summary (`RequestSummaryDto`), under one key. It is the most expensive read (a full collection scan), dashboards request it on every load, and short staleness is acceptable for summary counts |
 | **Where** | `IMemoryCache` (built into .NET), wrapped by `RequestSummaryCache`. No external cache or extra package |
 | **Expiration** | Absolute, 30 seconds by default (`RequestSummaryCache:TimeToLive`, from 1 second to 1 hour) |
-| **Invalidation** | `IRequestSummaryCache.Invalidate()`, called by the service **after** a write that affects the counts has succeeded. Status updates (F4) and bulk updates (F5) will call it |
+| **Invalidation** | `IRequestSummaryCache.Invalidate()`, called by the service **after** a write that affects the counts has succeeded. A successful status update calls it, and so does an update whose outcome is unknown (cancelled or failed after being sent); definite failures (`400`, `404`, `409`) do not. Bulk updates (F5) will call it once when at least one item was updated |
 | **Concurrent requests** | Single-flight: on a miss, one request computes and the others wait for the cached result. Measured: 20 concurrent requests on an empty cache produced one computation |
 | **Invalidation during a computation** | A generation counter is checked together with storing the result (under one lock). If an invalidation happened while the summary was being computed, the result is returned to its caller but not cached |
 | **Computation failure** | The exception propagates (for example as `503`), nothing is cached, and the next request retries |
@@ -387,8 +481,14 @@ Expected results are computed in memory from the same 500 seeded documents and c
 | `RequestsQueryTests` | Default sort; combined filters; half-open UTC date range; sorting by priority and by `updatedAt`; all pages contain every result exactly once; a page beyond the end; `$text` whole-word search (and no partial-word match); exact, case-sensitive organization filter; get by id (`200`, `404`) |
 | `RequestsValidationTests` | `400` with a field error for every invalid query parameter, too-long search text and malformed ids |
 | `RequestsSummaryTests` | Summary counts match the seeded documents; the summary is served from the cache until invalidated (a temporary document is inserted into the test database and deleted in `finally`); empty and missing collections return no counts |
+| `RequestsHistoryTests` | History matches the seeded entries in order, with `requestId`; an empty array for a `New` request; `404` and `400` |
+| `RequestsStatusUpdateTests` | A successful update changes status, `version`, `updatedAt` and adds a history entry in the database; a sequence of transitions is recorded in order; disallowed transitions, the current status and a final status return `400`; a stale version returns `409` with the current state; `404`; body, header and id validation; **10 concurrent updates with the same version: exactly one succeeds**; the conditional update matches only the expected version; the summary cache is invalidated after a successful update and not after failed ones; validation messages name the `X-User-Name` header and do not expose internal type names. Every rejected update of an existing request is checked to leave the document unchanged |
 | `StartupValidationTests` | The API refuses to start with an invalid `RequestSummaryCache:TimeToLive` (zero, negative, above one hour, not a time span) |
-| `DatabaseUnavailableTests` | `503` ProblemDetails when MongoDB is unreachable (list, get by id, summary). This uses the real failure path: the driver's server selection times out on an unused local port, and the global handler maps the exception to 503 |
+| `DatabaseUnavailableTests` | `503` ProblemDetails when MongoDB is unreachable (list, get by id, summary, history, status update). This uses the real failure path: the driver's server selection times out on an unused local port, and the global handler maps the exception to 503 |
+
+**Read and write tests use separate databases.** The read-only tests compare responses with the seeded documents,
+so the tests that change data (`RequestsStatusUpdateTests`) run in their own test collection, which creates a
+separate test database. Each write test creates the requests it changes.
 
 **Test database safety.** Each run uses a new database named `RequestsManagement_Tests_<guid>` on the local server.
 The database is dropped at the end only when all of the following hold:
@@ -408,6 +508,7 @@ Otherwise the database is left in place and a message is written.
 | `RequestDataGeneratorTests` | Determinism for a given seed; generated documents satisfy the consistency rules |
 | `RequestSummaryCacheTests` | Reuse of the cached value; still cached just before the TTL and recomputed just after it; `Invalidate()`; a failed computation is not cached; 20 calls that are all waiting before the first computation finishes compute once; an invalidation during a computation prevents caching its result; a cancelled waiter does not cancel the computation; a cancelled computation is not cached and the next waiter computes |
 | `RequestServiceSummaryTests` | Missing statuses and priorities are filled with zero; `totalCount` is the sum of statuses; an empty result returns all zeros |
+| `RequestServiceStatusUpdateTests` | Each outcome of a status update with a fake repository: success (history entry fields, one invalidation), not found, stale version, disallowed transitions, **an update that loses the race between the read and the write** (`409` with the latest version), a request removed in that window (`404`), timestamps that never go backwards and are truncated to milliseconds. Definite failures neither write nor invalidate; a write that is cancelled or fails with an unknown outcome propagates the exception and invalidates the summary |
 
 **TTL tests do not wait.** They use a real `MemoryCache` with a manual clock (`MemoryCacheOptions.Clock`)
 that the test moves forward, so expiration is deterministic.
@@ -431,7 +532,12 @@ The assignment defines the four statuses but not the transitions between them. T
 
 The policy is defined once in `Domain/StatusTransitions.cs`. It is used both by the seeder and by status updates.
 
-_TBD_ — `ChangedBy` source.
+### `ChangedBy` source
+
+The assignment does not include authentication, so the user who made a change is sent by the client in the
+`X-User-Name` header. **The value is not verified;** it records what the client declares. With authentication,
+the value would come from the authenticated user's claims instead, without changing the rest of the update flow.
+The value is stored in the history but not written to the logs.
 
 ## Known limitations and possible improvements
 
@@ -444,6 +550,8 @@ _TBD_ — `ChangedBy` source.
   In Hebrew, attached prefixes are not separated (`בקשה` does not find `הבקשה`). The seeded data is in English.
 - **MongoDB 5.0 is end-of-life.** The driver version is pinned to one that is fully compatible with it.
 - **Seeding is restricted to a local server** by design, to prevent accidental data loss.
+- **`changedBy` is not authenticated.** It records the `X-User-Name` header sent by the client.
+- **A `503` on a status update has an unknown outcome.** The update may have been applied; clients should reload the request.
 
 _TBD_
 

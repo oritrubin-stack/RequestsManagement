@@ -11,6 +11,17 @@ public interface IRequestRepository
     Task<RequestDocument?> GetByIdAsync(ObjectId id, CancellationToken cancellationToken);
 
     Task<RequestSummaryCounts> GetSummaryAsync(CancellationToken cancellationToken);
+
+    // Applies the status change only if the request still has the expected version.
+    // Returns the updated request (without history), or null when no document matched.
+    Task<RequestDocument?> TryUpdateStatusAsync(
+        ObjectId id,
+        int expectedVersion,
+        StatusChangeEntry change,
+        CancellationToken cancellationToken);
+
+    // Returns null when the request does not exist, and an empty list when it has no history.
+    Task<IReadOnlyList<StatusChangeEntry>?> GetHistoryAsync(ObjectId id, CancellationToken cancellationToken);
 }
 
 public sealed record RequestSearchResult(IReadOnlyList<RequestDocument> Items, long TotalCount);

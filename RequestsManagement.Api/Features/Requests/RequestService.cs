@@ -9,12 +9,18 @@ public sealed class RequestService
 {
     private readonly IRequestRepository _repository;
     private readonly IRequestSummaryCache _summaryCache;
+    private readonly TimeProvider _timeProvider;
     private readonly ILogger<RequestService> _logger;
 
-    public RequestService(IRequestRepository repository, IRequestSummaryCache summaryCache, ILogger<RequestService> logger)
+    public RequestService(
+        IRequestRepository repository,
+        IRequestSummaryCache summaryCache,
+        TimeProvider timeProvider,
+        ILogger<RequestService> logger)
     {
         _repository = repository;
         _summaryCache = summaryCache;
+        _timeProvider = timeProvider;
         _logger = logger;
     }
 
@@ -42,6 +48,96 @@ public sealed class RequestService
     {
         var document = await _repository.GetByIdAsync(id, cancellationToken);
         return document?.ToDto();
+    }
+
+    public async Task<StatusUpdateResult> UpdateStatusAsync(
+        ObjectId id,
+        RequestStatus newStatus,
+        int expectedVersion,
+        string changedBy,
+        CancellationToken cancellationToken)
+    {
+        var current = await _repository.GetByIdAsync(id, cancellationToken);
+        if (current is null)
+        {
+            return StatusUpdateResult.NotFound();
+        }
+
+        // Checked before the transition: a client holding a stale version must refresh,
+        // because judging the transition against a state it has not seen would be meaningless.
+        if (current.Version != expectedVersion)
+        {
+            _logger.LogInformation(
+                "Status update of request {RequestId} rejected: expected version {ExpectedVersion}, current version {CurrentVersion}",
+                id,
+                expectedVersion,
+                current.Version);
+            return StatusUpdateResult.VersionConflict(current.Version, current.Status);
+        }
+
+        if (!StatusTransitions.IsAllowed(current.Status, newStatus))
+        {
+            return StatusUpdateResult.InvalidTransition(current.Version, current.Status);
+        }
+
+        // PreviousStatus comes from the read above. It is still accurate when the update matches,
+        // because any status change would also have changed the version that the update filters on.
+        var change = new StatusChangeEntry
+        {
+            PreviousStatus = current.Status,
+            NewStatus = newStatus,
+            ChangedAt = NextTimestamp(current.UpdatedAt),
+            ChangedBy = changedBy
+        };
+
+        // Correctness relies on this conditional update, not on the read above.
+        RequestDocument? updated;
+        try
+        {
+            updated = await _repository.TryUpdateStatusAsync(id, expectedVersion, change, cancellationToken);
+        }
+        catch
+        {
+            // Once sent, the update may have been applied even if the call is cancelled or fails before the reply
+            // arrives (the driver does not stop the command on the server). The outcome is unknown, so the summary
+            // is invalidated conservatively; the exception still propagates and no success is reported.
+            _summaryCache.Invalidate();
+            throw;
+        }
+        if (updated is null)
+        {
+            // Another write changed (or removed) the request between the read and the update.
+            var latest = await _repository.GetByIdAsync(id, cancellationToken);
+            if (latest is null)
+            {
+                return StatusUpdateResult.NotFound();
+            }
+
+            _logger.LogInformation(
+                "Status update of request {RequestId} lost a concurrent update: expected version {ExpectedVersion}, current version {CurrentVersion}",
+                id,
+                expectedVersion,
+                latest.Version);
+            return StatusUpdateResult.VersionConflict(latest.Version, latest.Status);
+        }
+
+        // Only after the write has succeeded.
+        _summaryCache.Invalidate();
+
+        _logger.LogInformation(
+            "Request {RequestId} status changed from {PreviousStatus} to {NewStatus}, version {Version}",
+            id,
+            change.PreviousStatus,
+            change.NewStatus,
+            updated.Version);
+
+        return StatusUpdateResult.Updated(updated.ToDto());
+    }
+
+    public async Task<IReadOnlyList<StatusChangeDto>?> GetHistoryAsync(ObjectId id, CancellationToken cancellationToken)
+    {
+        var history = await _repository.GetHistoryAsync(id, cancellationToken);
+        return history?.Select(entry => entry.ToDto(id)).ToList();
     }
 
     public Task<RequestSummaryDto> GetSummaryAsync(CancellationToken cancellationToken) =>
@@ -75,6 +171,15 @@ public sealed class RequestService
             .ToList();
 
         return new RequestSummaryDto(byStatus.Sum(x => x.Count), byStatus, byPriority, generatedAt);
+    }
+
+    // Millisecond precision matches what MongoDB stores. Never earlier than the previous update,
+    // so the history stays in order even if server clocks differ between API instances.
+    private DateTime NextTimestamp(DateTime previousUpdate)
+    {
+        var now = _timeProvider.GetUtcNow().UtcDateTime;
+        var truncated = new DateTime(now.Ticks - now.Ticks % TimeSpan.TicksPerMillisecond, DateTimeKind.Utc);
+        return truncated > previousUpdate ? truncated : DateTime.SpecifyKind(previousUpdate, DateTimeKind.Utc);
     }
 
     private static IEnumerable<string> GetActiveFilterNames(RequestQueryParameters query)

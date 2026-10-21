@@ -14,7 +14,14 @@ var builder = WebApplication.CreateBuilder(args.Where(arg => arg != SeedArgument
 // Add services to the container.
 builder.Services
     .AddControllers()
-    .AddJsonOptions(options => options.JsonSerializerOptions.Converters.Add(new JsonStringEnumConverter()));
+    .AddJsonOptions(options =>
+    {
+        options.JsonSerializerOptions.Converters.Add(new JsonStringEnumConverter());
+
+        // Invalid JSON input is reported as "The input was not valid." under the field path (for example "$.status")
+        // instead of the serializer message, which names internal CLR types.
+        options.AllowInputFormatterExceptionMessages = false;
+    });
 
 builder.Services.AddProblemDetails();
 builder.Services.AddExceptionHandler<GlobalExceptionHandler>();
@@ -28,6 +35,7 @@ builder.Services.AddMongoDb(builder.Configuration);
 // Stateless request-scoped services; the MongoDB client and collection they use are singletons.
 builder.Services.AddScoped<IRequestRepository, RequestRepository>();
 builder.Services.AddScoped<RequestService>();
+builder.Services.AddSingleton(TimeProvider.System);
 
 // The summary cache is a singleton: it owns the single-flight lock and the invalidation generation for this instance.
 builder.Services.AddMemoryCache();

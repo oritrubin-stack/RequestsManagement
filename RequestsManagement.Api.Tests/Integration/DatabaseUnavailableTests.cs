@@ -1,4 +1,6 @@
 using System.Net;
+using System.Net.Http.Json;
+using RequestsManagement.Api.Features.Requests;
 using RequestsManagement.Api.Tests.Infrastructure;
 
 namespace RequestsManagement.Api.Tests.Integration;
@@ -25,6 +27,7 @@ public sealed class DatabaseUnavailableTests : IAsyncLifetime
     [InlineData("/api/requests")]
     [InlineData("/api/requests/000000000000000000000000")]
     [InlineData("/api/requests/summary")]
+    [InlineData("/api/requests/000000000000000000000000/history")]
     public async Task Request_WhenDatabaseIsUnreachable_Returns503ProblemDetails(string url)
     {
         var client = _factory.CreateClient();
@@ -38,5 +41,23 @@ public sealed class DatabaseUnavailableTests : IAsyncLifetime
         Assert.Equal("The database is temporarily unavailable.", problem.GetProperty("title").GetString());
         Assert.True(problem.TryGetProperty("traceId", out _));
         Assert.False(problem.TryGetProperty("detail", out _), "Internal exception details must not be returned.");
+    }
+
+    [Fact]
+    public async Task StatusUpdate_WhenDatabaseIsUnreachable_Returns503ProblemDetails()
+    {
+        var client = _factory.CreateClient();
+        var message = new HttpRequestMessage(HttpMethod.Put, "/api/requests/000000000000000000000000/status")
+        {
+            Content = JsonContent.Create(new { status = "InProgress", expectedVersion = 1 })
+        };
+        message.Headers.Add(RequestsController.ChangedByHeader, "dana.cohen");
+
+        var response = await client.SendAsync(message);
+        var problem = await response.ReadJsonAsync();
+
+        Assert.Equal(HttpStatusCode.ServiceUnavailable, response.StatusCode);
+        Assert.Equal(503, problem.GetProperty("status").GetInt32());
+        Assert.True(problem.TryGetProperty("traceId", out _));
     }
 }

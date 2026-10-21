@@ -87,6 +87,46 @@ public sealed class RequestRepository : IRequestRepository
             ToDictionary(result.Facets.Single(f => f.Name == ByPriorityFacet).Output<GroupCount<RequestPriority>>()));
     }
 
+    // A single-document update is atomic in MongoDB. The filter includes the expected version, so of two concurrent
+    // updates based on the same version only the first can match; status, updatedAt, version and the history entry
+    // are written together in that one operation.
+    public async Task<RequestDocument?> TryUpdateStatusAsync(
+        ObjectId id,
+        int expectedVersion,
+        StatusChangeEntry change,
+        CancellationToken cancellationToken)
+    {
+        var filter = Filter.And(
+            Filter.Eq(x => x.Id, id),
+            Filter.Eq(x => x.Version, expectedVersion));
+
+        var update = Builders<RequestDocument>.Update
+            .Set(x => x.Status, change.NewStatus)
+            .Set(x => x.UpdatedAt, change.ChangedAt)
+            .Inc(x => x.Version, 1)
+            .Push(x => x.StatusHistory, change);
+
+        return await _collection.FindOneAndUpdateAsync(
+            filter,
+            update,
+            new FindOneAndUpdateOptions<RequestDocument>
+            {
+                ReturnDocument = ReturnDocument.After,
+                Projection = WithoutHistory
+            },
+            cancellationToken);
+    }
+
+    public async Task<IReadOnlyList<StatusChangeEntry>?> GetHistoryAsync(ObjectId id, CancellationToken cancellationToken)
+    {
+        var document = await _collection
+            .Find(Filter.Eq(x => x.Id, id))
+            .Project<RequestDocument>(Builders<RequestDocument>.Projection.Include(x => x.StatusHistory))
+            .FirstOrDefaultAsync(cancellationToken);
+
+        return document?.StatusHistory;
+    }
+
     private static Dictionary<TKey, long> ToDictionary<TKey>(IEnumerable<GroupCount<TKey>> counts) where TKey : notnull =>
         counts.ToDictionary(x => x.Key, x => (long)x.Count);
 
