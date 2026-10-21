@@ -28,6 +28,9 @@ public sealed class MongoTestDatabaseFixture : IAsyncLifetime
 
     public IReadOnlyList<RequestDocument> Requests { get; private set; } = [];
 
+    // The test database created by this run; tests must not write anywhere else.
+    public IMongoDatabase Database { get; private set; } = null!;
+
     public RequestsApiFactory Factory { get; private set; } = null!;
 
     public HttpClient Client { get; private set; } = null!;
@@ -87,6 +90,7 @@ public sealed class MongoTestDatabaseFixture : IAsyncLifetime
         await database.GetCollection<BsonDocument>(MarkerCollectionName)
             .InsertOneAsync(new BsonDocument { ["_id"] = _runId, ["createdAt"] = DateTime.UtcNow });
         _createdByThisRun = true;
+        Database = database;
 
         var requests = new RequestDataGenerator(GeneratorSeed).Generate(RequestCount).ToList();
         await database.GetCollection<RequestDocument>(MongoServiceCollectionExtensions.RequestsCollectionName)

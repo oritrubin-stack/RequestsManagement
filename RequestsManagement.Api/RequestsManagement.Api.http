@@ -24,6 +24,10 @@ Accept: application/json
 GET {{RequestsManagement.Api_HostAddress}}/api/requests?pageSize=101&sortBy=title&status=Closed
 Accept: application/json
 
+### Summary counts by status and priority (cached for 30 seconds per API instance)
+GET {{RequestsManagement.Api_HostAddress}}/api/requests/summary
+Accept: application/json
+
 ### Get by id (replace with an existing id) -> 200 or 404
 GET {{RequestsManagement.Api_HostAddress}}/api/requests/000000000000000000000000
 Accept: application/json

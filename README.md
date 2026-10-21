@@ -36,6 +36,7 @@ official [compatibility tables](https://www.mongodb.com/docs/drivers/compatibili
 | `MongoDb:ConnectionString` | `mongodb://localhost:27017` | `appsettings.Development.json` (no credentials) |
 | `MongoDb:DatabaseName` | `RequestsManagement` | `appsettings.json` |
 | `MongoDb:EnsureIndexesOnStartup` | `true` | When `false`, the API starts without contacting MongoDB (the indexes must already exist) |
+| `RequestSummaryCache:TimeToLive` | `00:00:30` | `appsettings.json`; expiration of the cached summary (1 second to 1 hour) |
 
 Both can be overridden with environment variables, for example `MongoDb__ConnectionString`.
 Outside the Development environment no connection string is provided, and the API fails at startup until one is configured.
@@ -231,6 +232,9 @@ All errors are returned as ProblemDetails (`application/problem+json`) with a `t
 | `500` | Any other unexpected error; details are logged, not returned |
 
 If the client disconnects, the request is cancelled through the `CancellationToken` and logged at Information level.
+
+In .NET 8, ASP.NET Core's `ExceptionHandlerMiddleware` also logs every unhandled exception at Error level before the
+global handler runs. A database outage therefore appears twice in the server log (Error and Warning). Clients are not affected.
 Logs include the names of active filters, result counts and timings. Search text and filter values are not logged.
 
 ### Indexes and query plans
@@ -272,9 +276,87 @@ _TBD_
 
 _TBD_ — failure policy (partial success) and response format.
 
+## Summary aggregations
+
+### `GET /api/requests/summary`
+
+Counts across all requests (no filters), grouped by status and by priority:
+
+```json
+{
+  "totalCount": 100000,
+  "byStatus": [
+    { "status": "New", "count": 19897 },
+    { "status": "InProgress", "count": 30134 },
+    { "status": "Waiting", "count": 14933 },
+    { "status": "Completed", "count": 35036 }
+  ],
+  "byPriority": [
+    { "priority": "Low", "count": 40169 },
+    { "priority": "Medium", "count": 39746 },
+    { "priority": "High", "count": 20085 }
+  ],
+  "generatedAt": "2026-10-21T11:15:02.123Z"
+}
+```
+
+- **Always the same shape.** Every status and priority is present, in enum order, with zero when it has no requests.
+  An empty collection returns all zeros.
+- **`totalCount` is the sum of `byStatus`.**
+- **`generatedAt` is when the computation started.** The counts were read after that moment, so the data is
+  at least that fresh. A cached response keeps the original `generatedAt`, which shows how old it is.
+
+### How it is computed
+
+A single aggregation pipeline runs in MongoDB:
+
+```js
+[{ $facet: {
+    byStatus:   [{ $group: { _id: "$status",   count: { $sum: 1 } } }],
+    byPriority: [{ $group: { _id: "$priority", count: { $sum: 1 } } }]
+}}]
+```
+
+- **Both groupings come from the same collection scan** in one `$facet` stage.
+- **It is not a point-in-time snapshot.** Writes made while the scan runs may or may not be reflected, so under
+  concurrent writes the counts are approximate for that moment. MongoDB snapshot reads require a replica set,
+  and this project runs on a standalone server.
+- **No index helps a full grouping.** Measured on 100,000 documents:
+  - `$facet` is a collection scan, with a median of about 0.67 s.
+  - An index-covered `$sort` + `$group` scanned 100,000 index keys and was slower (about 0.96 s for status alone).
+  - Seven `countDocuments` calls were faster (about 0.37 s), but they are seven separate reads, so their totals can disagree under concurrent writes.
+- **Timings vary with machine load.** The cost of a full scan is why the summary is cached.
+
 ## Cache and invalidation
 
-_TBD_ — what is cached, expiration, invalidation, and multi-instance considerations.
+| Aspect | Behavior |
+|---|---|
+| **What is cached** | Only the summary (`RequestSummaryDto`), under one key. It is the most expensive read (a full collection scan), dashboards request it on every load, and short staleness is acceptable for summary counts |
+| **Where** | `IMemoryCache` (built into .NET), wrapped by `RequestSummaryCache`. No external cache or extra package |
+| **Expiration** | Absolute, 30 seconds by default (`RequestSummaryCache:TimeToLive`, from 1 second to 1 hour) |
+| **Invalidation** | `IRequestSummaryCache.Invalidate()`, called by the service **after** a write that affects the counts has succeeded. Status updates (F4) and bulk updates (F5) will call it |
+| **Concurrent requests** | Single-flight: on a miss, one request computes and the others wait for the cached result. Measured: 20 concurrent requests on an empty cache produced one computation |
+| **Invalidation during a computation** | A generation counter is checked together with storing the result (under one lock). If an invalidation happened while the summary was being computed, the result is returned to its caller but not cached |
+| **Computation failure** | The exception propagates (for example as `503`), nothing is cached, and the next request retries |
+| **Cancellation** | A request cancelled while *waiting* only stops waiting; the running computation continues for the others. If the *computing* request is cancelled, its query stops and the next waiting request computes instead |
+
+**Why the TTL is still needed when writes invalidate.** Invalidation only reaches this instance's cache.
+The TTL bounds staleness for changes this instance never sees: writes handled by other API instances,
+the seeder (a separate process), and direct database edits. It also limits the impact of a write path that fails to invalidate.
+
+**Invalidation cannot fail like a remote call,** because removing an in-memory entry involves no I/O.
+If the process stops between a write and its invalidation, the cache is lost with the process.
+
+### Limitation: multiple API instances
+
+**The cache is not synchronized between instances.** Each instance keeps its own copy, and `Invalidate()` clears only
+the instance that handled the write. Another instance can return a summary that is stale by up to the TTL (30 seconds).
+Sticky sessions do not solve this, because the write and the read can reach different instances.
+
+Ways to synchronize when running several instances:
+- **A shared cache** (for example Redis through `IDistributedCache`). This adds a server and a package.
+  Invalidation becomes a network call that can fail, so the TTL is still required.
+- **Local caches plus an invalidation message** (for example Redis pub/sub) broadcast to all instances after a write.
 
 ## Performance
 
@@ -304,7 +386,9 @@ Expected results are computed in memory from the same 500 seeded documents and c
 |---|---|
 | `RequestsQueryTests` | Default sort; combined filters; half-open UTC date range; sorting by priority and by `updatedAt`; all pages contain every result exactly once; a page beyond the end; `$text` whole-word search (and no partial-word match); exact, case-sensitive organization filter; get by id (`200`, `404`) |
 | `RequestsValidationTests` | `400` with a field error for every invalid query parameter, too-long search text and malformed ids |
-| `DatabaseUnavailableTests` | `503` ProblemDetails when MongoDB is unreachable. This uses the real failure path: the driver's server selection times out on an unused local port, and the global handler maps the exception to 503 |
+| `RequestsSummaryTests` | Summary counts match the seeded documents; the summary is served from the cache until invalidated (a temporary document is inserted into the test database and deleted in `finally`); empty and missing collections return no counts |
+| `StartupValidationTests` | The API refuses to start with an invalid `RequestSummaryCache:TimeToLive` (zero, negative, above one hour, not a time span) |
+| `DatabaseUnavailableTests` | `503` ProblemDetails when MongoDB is unreachable (list, get by id, summary). This uses the real failure path: the driver's server selection times out on an unused local port, and the global handler maps the exception to 503 |
 
 **Test database safety.** Each run uses a new database named `RequestsManagement_Tests_<guid>` on the local server.
 The database is dropped at the end only when all of the following hold:
@@ -322,6 +406,11 @@ Otherwise the database is left in place and a message is written.
 | `StatusTransitionsTests` | Allowed and disallowed transitions; `Completed` is final |
 | `RequestQueryParametersTests` | Defaults; UTC normalization of dates without an offset and of local dates; range comparison after normalization |
 | `RequestDataGeneratorTests` | Determinism for a given seed; generated documents satisfy the consistency rules |
+| `RequestSummaryCacheTests` | Reuse of the cached value; still cached just before the TTL and recomputed just after it; `Invalidate()`; a failed computation is not cached; 20 calls that are all waiting before the first computation finishes compute once; an invalidation during a computation prevents caching its result; a cancelled waiter does not cancel the computation; a cancelled computation is not cached and the next waiter computes |
+| `RequestServiceSummaryTests` | Missing statuses and priorities are filled with zero; `totalCount` is the sum of statuses; an empty result returns all zeros |
+
+**TTL tests do not wait.** They use a real `MemoryCache` with a manual clock (`MemoryCacheOptions.Clock`)
+that the test moves forward, so expiration is deterministic.
 
 ## Technical decisions and alternatives
 

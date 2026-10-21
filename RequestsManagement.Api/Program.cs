@@ -29,6 +29,14 @@ builder.Services.AddMongoDb(builder.Configuration);
 builder.Services.AddScoped<IRequestRepository, RequestRepository>();
 builder.Services.AddScoped<RequestService>();
 
+// The summary cache is a singleton: it owns the single-flight lock and the invalidation generation for this instance.
+builder.Services.AddMemoryCache();
+builder.Services.AddOptions<RequestSummaryCacheOptions>()
+    .Bind(builder.Configuration.GetSection(RequestSummaryCacheOptions.SectionName))
+    .ValidateDataAnnotations()
+    .ValidateOnStart();
+builder.Services.AddSingleton<IRequestSummaryCache, RequestSummaryCache>();
+
 var app = builder.Build();
 
 if (seedRequested)

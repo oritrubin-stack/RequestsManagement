@@ -16,6 +16,9 @@ public sealed class RequestRepository : IRequestRepository
     private static readonly ProjectionDefinition<RequestDocument> WithoutHistory =
         Builders<RequestDocument>.Projection.Exclude(x => x.StatusHistory);
 
+    private const string ByStatusFacet = "byStatus";
+    private const string ByPriorityFacet = "byPriority";
+
     private readonly IMongoCollection<RequestDocument> _collection;
 
     public RequestRepository(IMongoCollection<RequestDocument> collection)
@@ -52,6 +55,40 @@ public sealed class RequestRepository : IRequestRepository
             .Find(Filter.Eq(x => x.Id, id))
             .Project<RequestDocument>(WithoutHistory)
             .FirstOrDefaultAsync(cancellationToken);
+
+    // Both groupings are computed by one $facet stage from the same collection scan.
+    // This scans the whole collection (no index helps a full grouping), which is why the result is cached.
+    // It is not a point-in-time snapshot: concurrent writes may or may not be reflected (snapshot reads need a replica set).
+    public async Task<RequestSummaryCounts> GetSummaryAsync(CancellationToken cancellationToken)
+    {
+        var byStatus = AggregateFacet.Create(
+            ByStatusFacet,
+            new EmptyPipelineDefinition<RequestDocument>()
+                .Group(x => x.Status, g => new GroupCount<RequestStatus> { Key = g.Key, Count = g.Count() }));
+
+        var byPriority = AggregateFacet.Create(
+            ByPriorityFacet,
+            new EmptyPipelineDefinition<RequestDocument>()
+                .Group(x => x.Priority, g => new GroupCount<RequestPriority> { Key = g.Key, Count = g.Count() }));
+
+        var result = await _collection.Aggregate()
+            .Facet(byStatus, byPriority)
+            .FirstOrDefaultAsync(cancellationToken);
+
+        if (result is null)
+        {
+            return new RequestSummaryCounts(
+                new Dictionary<RequestStatus, long>(),
+                new Dictionary<RequestPriority, long>());
+        }
+
+        return new RequestSummaryCounts(
+            ToDictionary(result.Facets.Single(f => f.Name == ByStatusFacet).Output<GroupCount<RequestStatus>>()),
+            ToDictionary(result.Facets.Single(f => f.Name == ByPriorityFacet).Output<GroupCount<RequestPriority>>()));
+    }
+
+    private static Dictionary<TKey, long> ToDictionary<TKey>(IEnumerable<GroupCount<TKey>> counts) where TKey : notnull =>
+        counts.ToDictionary(x => x.Key, x => (long)x.Count);
 
     private static List<FilterDefinition<RequestDocument>> BuildFilters(RequestQueryParameters query)
     {
@@ -118,5 +155,12 @@ public sealed class RequestRepository : IRequestRepository
                 ? Sort.Ascending(x => x.CreatedAt).Ascending(x => x.Id)
                 : Sort.Descending(x => x.CreatedAt).Descending(x => x.Id)
         };
+    }
+
+    private sealed class GroupCount<TKey>
+    {
+        public TKey Key { get; set; } = default!;
+
+        public int Count { get; set; }
     }
 }

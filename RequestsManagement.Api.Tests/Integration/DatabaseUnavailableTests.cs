@@ -24,6 +24,7 @@ public sealed class DatabaseUnavailableTests : IAsyncLifetime
     [Theory]
     [InlineData("/api/requests")]
     [InlineData("/api/requests/000000000000000000000000")]
+    [InlineData("/api/requests/summary")]
     public async Task Request_WhenDatabaseIsUnreachable_Returns503ProblemDetails(string url)
     {
         var client = _factory.CreateClient();

@@ -28,6 +28,14 @@ public sealed class RequestsController : ControllerBase
         return Ok(await _service.SearchAsync(query, cancellationToken));
     }
 
+    // Counts by status and by priority across all requests. Served from a per-instance cache (see README).
+    [HttpGet("summary")]
+    [ProducesResponseType(typeof(RequestSummaryDto), StatusCodes.Status200OK, "application/json")]
+    public async Task<ActionResult<RequestSummaryDto>> GetSummary(CancellationToken cancellationToken)
+    {
+        return Ok(await _service.GetSummaryAsync(cancellationToken));
+    }
+
     [HttpGet("{id}")]
     [ProducesResponseType(typeof(RequestDto), StatusCodes.Status200OK, "application/json")]
     [ProducesResponseType(typeof(ValidationProblemDetails), StatusCodes.Status400BadRequest, "application/problem+json")]
