@@ -72,6 +72,9 @@ public sealed class RequestServiceSummaryTests
         public Task<RequestDocument?> GetByIdAsync(ObjectId id, CancellationToken cancellationToken) =>
             throw new NotSupportedException();
 
+        public Task<IReadOnlyList<RequestDocument>> GetByIdsAsync(IReadOnlyCollection<ObjectId> ids, CancellationToken cancellationToken) =>
+            throw new NotSupportedException();
+
         public Task<RequestDocument?> TryUpdateStatusAsync(
             ObjectId id,
             int expectedVersion,

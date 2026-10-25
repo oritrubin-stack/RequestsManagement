@@ -60,4 +60,25 @@ public sealed class DatabaseUnavailableTests : IAsyncLifetime
         Assert.Equal(503, problem.GetProperty("status").GetInt32());
         Assert.True(problem.TryGetProperty("traceId", out _));
     }
+
+    [Fact]
+    public async Task BulkStatusUpdate_WhenDatabaseIsUnreachable_Returns503ProblemDetails()
+    {
+        var client = _factory.CreateClient();
+        var message = new HttpRequestMessage(HttpMethod.Post, "/api/requests/status/bulk")
+        {
+            Content = JsonContent.Create(new
+            {
+                items = new[] { new { id = "000000000000000000000000", status = "InProgress", expectedVersion = 1 } }
+            })
+        };
+        message.Headers.Add(RequestsController.ChangedByHeader, "dana.cohen");
+
+        var response = await client.SendAsync(message);
+        var problem = await response.ReadJsonAsync();
+
+        Assert.Equal(HttpStatusCode.ServiceUnavailable, response.StatusCode);
+        Assert.Equal(503, problem.GetProperty("status").GetInt32());
+        Assert.True(problem.TryGetProperty("traceId", out _));
+    }
 }

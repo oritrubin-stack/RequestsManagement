@@ -368,7 +368,95 @@ connection on cancellation or a network failure, but it does not stop the comman
 
 ## Bulk status update
 
-_TBD_ — failure policy (partial success) and response format.
+### `POST /api/requests/status/bulk`
+
+```http
+POST /api/requests/status/bulk
+X-User-Name: dana.cohen
+Content-Type: application/json
+
+{
+  "items": [
+    { "id": "6ad881e1a051e7edd89d0ef0", "status": "InProgress", "expectedVersion": 1 },
+    { "id": "6ad881e1a051e7edd89d0ef2", "status": "InProgress", "expectedVersion": 1 },
+    { "id": "6ad881e1a051e7edd89d0ef1", "status": "InProgress", "expectedVersion": 4 },
+    { "id": "6ad881e1a051e7edd89d0ef3", "status": "InProgress", "expectedVersion": 3 }
+  ]
+}
+```
+
+- **Items:** 1 to 100. Each item has the same fields and rules as `PUT /api/requests/{id}/status`.
+- **`X-User-Name`:** one header for the whole batch, recorded as `changedBy` in each history entry.
+
+**Response `200 OK`, whenever the request was processed,** even if no item was updated:
+
+```json
+{
+  "updatedCount": 1,
+  "notFoundCount": 1,
+  "versionConflictCount": 1,
+  "invalidTransitionCount": 1,
+  "results": [
+    { "id": "6ad881e1a051e7edd89d0ef0", "outcome": "Updated",
+      "request": { "id": "6ad881e1a051e7edd89d0ef0", "status": "InProgress", "version": 2, "…": "abbreviated" } },
+    { "id": "6ad881e1a051e7edd89d0ef2", "outcome": "NotFound" },
+    { "id": "6ad881e1a051e7edd89d0ef1", "outcome": "VersionConflict", "currentVersion": 5, "currentStatus": "Waiting" },
+    { "id": "6ad881e1a051e7edd89d0ef3", "outcome": "InvalidTransition", "currentVersion": 3, "currentStatus": "Completed",
+      "message": "The request is in status Completed, which is final." }
+  ]
+}
+```
+
+- **Order:** `results` are in the order of `items`.
+- **`Updated` items:** include the updated request with its new `version`. In this example the `request` object is
+  abbreviated (marked `"…"`); the actual response contains the full `RequestDto`.
+- **`currentVersion` and `currentStatus` in a `VersionConflict`** are not necessarily the state at the moment the response
+  is received. When the conflict is found by the early version check, they come from the batch read at the start of
+  the batch; when the conditional update loses a race, they come from the re-read that follows it. Either way, another
+  update may have happened since, so reload the request before retrying.
+
+| Status | When |
+|---|---|
+| `200` | The batch was processed; each item has its own outcome |
+| `400` | The request is invalid: `items` missing or empty, more than 100 items, an item with an invalid `id`, `status` or `expectedVersion`, **duplicate ids** (compared as ObjectIds, so letter case does not matter), or an invalid `X-User-Name`. **No item is processed** |
+| `503` / `499` | The database failed, or the client disconnected, during processing (see the failure policy) |
+
+### Failure policy: partial success
+
+**Each item is processed independently, in request order, with exactly the rules of a single update:**
+the version check, the transition policy, and the same conditional atomic update on `_id` and `version`.
+An item succeeds or fails only because of its own state. Every successful item is saved with its history entry,
+whatever happens to the other items.
+
+**What this means for the client:**
+- **A batch is not atomic.** Some items can be applied while others are not. All-or-nothing would need a
+  multi-document transaction (a replica set), and a single conflict would discard every valid change in the batch.
+- **Retrying is safe.** Resending the same batch cannot apply an item twice: an item that was already applied
+  returns `VersionConflict`, because its version has changed.
+- **Duplicate ids are rejected,** because two changes to the same request in one batch have no clear meaning.
+
+**When the database fails during a batch** (timeout or connection failure), processing stops and the API returns
+`503`, as for a single update. Items processed before the failure stay applied, the item being written has an
+unknown outcome, and the remaining items were not attempted. The client should reload the requests (their `version`
+shows which changes were applied) or resend the batch. Processing does not continue after a failure, because each
+remaining item would otherwise wait for the server selection timeout.
+
+### How it runs
+
+1. **Validation** of the whole request, before anything is processed.
+2. **One read** for the batch: a `$in` query on `_id` that loads only the requested items (without history).
+   This read is only an optimization: it feeds validation and the history entries.
+3. **For each item, in order:** the same checks and the same conditional `findOneAndUpdate` as a single update.
+   A version read in step 2 never decides by itself that a change applies. If another update wins between the read
+   and the write, the conditional update does not match, and the item returns `VersionConflict` with the latest version.
+4. **The summary cache is invalidated once per batch,** if at least one item was updated or a write had an unknown
+   outcome, including when the batch stops early because of an error. A batch without a successful update
+   does not invalidate it. The late-write limitation of a single update also applies to a batch: if the server applies
+   a write only after the API stopped waiting for it, a summary can stay cached with the previous counts for up to the
+   TTL (30 seconds). See [When the outcome of an update is unknown](#when-the-outcome-of-an-update-is-unknown).
+
+**Measured:** a batch of 100 items (one read and 100 conditional updates, on the local MongoDB) took about 100 ms,
+and about 230 ms when it was the first request after startup.
 
 ## Summary aggregations
 
@@ -428,7 +516,7 @@ A single aggregation pipeline runs in MongoDB:
 | **What is cached** | Only the summary (`RequestSummaryDto`), under one key. It is the most expensive read (a full collection scan), dashboards request it on every load, and short staleness is acceptable for summary counts |
 | **Where** | `IMemoryCache` (built into .NET), wrapped by `RequestSummaryCache`. No external cache or extra package |
 | **Expiration** | Absolute, 30 seconds by default (`RequestSummaryCache:TimeToLive`, from 1 second to 1 hour) |
-| **Invalidation** | `IRequestSummaryCache.Invalidate()`, called by the service **after** a write that affects the counts has succeeded. A successful status update calls it, and so does an update whose outcome is unknown (cancelled or failed after being sent); definite failures (`400`, `404`, `409`) do not. Bulk updates (F5) will call it once when at least one item was updated |
+| **Invalidation** | `IRequestSummaryCache.Invalidate()`, called by the service **after** a write that affects the counts has succeeded. A successful status update calls it, and so does an update whose outcome is unknown (cancelled or failed after being sent); definite failures (`400`, `404`, `409`) do not. A bulk update calls it once per batch, when at least one item was updated or had an unknown outcome |
 | **Concurrent requests** | Single-flight: on a miss, one request computes and the others wait for the cached result. Measured: 20 concurrent requests on an empty cache produced one computation |
 | **Invalidation during a computation** | A generation counter is checked together with storing the result (under one lock). If an invalidation happened while the summary was being computed, the result is returned to its caller but not cached |
 | **Computation failure** | The exception propagates (for example as `503`), nothing is cached, and the next request retries |
@@ -483,8 +571,9 @@ Expected results are computed in memory from the same 500 seeded documents and c
 | `RequestsSummaryTests` | Summary counts match the seeded documents; the summary is served from the cache until invalidated (a temporary document is inserted into the test database and deleted in `finally`); empty and missing collections return no counts |
 | `RequestsHistoryTests` | History matches the seeded entries in order, with `requestId`; an empty array for a `New` request; `404` and `400` |
 | `RequestsStatusUpdateTests` | A successful update changes status, `version`, `updatedAt` and adds a history entry in the database; a sequence of transitions is recorded in order; disallowed transitions, the current status and a final status return `400`; a stale version returns `409` with the current state; `404`; body, header and id validation; **10 concurrent updates with the same version: exactly one succeeds**; the conditional update matches only the expected version; the summary cache is invalidated after a successful update and not after failed ones; validation messages name the `X-User-Name` header and do not expose internal type names. Every rejected update of an existing request is checked to leave the document unchanged |
+| `RequestsBulkStatusUpdateTests` | A mixed batch returns every outcome in request order and applies only the valid changes; 100 items are all applied; 101 items return `400`; every structural error (empty or missing items, invalid id, status or version in one item, duplicate ids, missing header) returns `400` **and leaves a valid item in the same request unapplied**; the summary is invalidated only when an item was updated; **two concurrent batches over the same 20 requests update each request exactly once**; a batch and a single update on the same request: exactly one succeeds; `$in` read returns only the requested ids |
 | `StartupValidationTests` | The API refuses to start with an invalid `RequestSummaryCache:TimeToLive` (zero, negative, above one hour, not a time span) |
-| `DatabaseUnavailableTests` | `503` ProblemDetails when MongoDB is unreachable (list, get by id, summary, history, status update). This uses the real failure path: the driver's server selection times out on an unused local port, and the global handler maps the exception to 503 |
+| `DatabaseUnavailableTests` | `503` ProblemDetails when MongoDB is unreachable (list, get by id, summary, history, status update, bulk update). This uses the real failure path: the driver's server selection times out on an unused local port, and the global handler maps the exception to 503 |
 
 **Read and write tests use separate databases.** The read-only tests compare responses with the seeded documents,
 so the tests that change data (`RequestsStatusUpdateTests`) run in their own test collection, which creates a
@@ -509,6 +598,8 @@ Otherwise the database is left in place and a message is written.
 | `RequestSummaryCacheTests` | Reuse of the cached value; still cached just before the TTL and recomputed just after it; `Invalidate()`; a failed computation is not cached; 20 calls that are all waiting before the first computation finishes compute once; an invalidation during a computation prevents caching its result; a cancelled waiter does not cancel the computation; a cancelled computation is not cached and the next waiter computes |
 | `RequestServiceSummaryTests` | Missing statuses and priorities are filled with zero; `totalCount` is the sum of statuses; an empty result returns all zeros |
 | `RequestServiceStatusUpdateTests` | Each outcome of a status update with a fake repository: success (history entry fields, one invalidation), not found, stale version, disallowed transitions, **an update that loses the race between the read and the write** (`409` with the latest version), a request removed in that window (`404`), timestamps that never go backwards and are truncated to milliseconds. Definite failures neither write nor invalidate; a write that is cancelled or fails with an unknown outcome propagates the exception and invalidates the summary |
+| `RequestServiceBulkStatusUpdateTests` | With an in-memory repository whose conditional update matches only the expected version: mixed outcomes in request order with **one batch read and one invalidation**; no invalidation without a successful update; a change that loses the race after the batch read is a conflict while the other items continue; a write failure mid-batch stops processing, propagates and invalidates exactly once; a failure before any write does not invalidate |
+| `BulkUpdateStatusRequestTests` | 1 and 100 items are valid; 0, 101 and missing items are not; an invalid id is reported on its item; duplicate ids are rejected regardless of letter case |
 
 **TTL tests do not wait.** They use a real `MemoryCache` with a manual clock (`MemoryCacheOptions.Clock`)
 that the test moves forward, so expiration is deterministic.
@@ -552,6 +643,8 @@ The value is stored in the history but not written to the logs.
 - **Seeding is restricted to a local server** by design, to prevent accidental data loss.
 - **`changedBy` is not authenticated.** It records the `X-User-Name` header sent by the client.
 - **A `503` on a status update has an unknown outcome.** The update may have been applied; clients should reload the request.
+- **A bulk update is not atomic.** Items are applied independently (partial success); after a `503`, items processed
+  before the failure stay applied.
 
 _TBD_
 

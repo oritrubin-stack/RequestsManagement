@@ -63,6 +63,81 @@ public sealed class RequestService
             return StatusUpdateResult.NotFound();
         }
 
+        var writes = new WriteTracker();
+        try
+        {
+            return await ApplyStatusChangeAsync(current, newStatus, expectedVersion, changedBy, writes, cancellationToken);
+        }
+        finally
+        {
+            // After a successful write, or when a write may have been applied (unknown outcome).
+            if (writes.PossiblyWritten)
+            {
+                _summaryCache.Invalidate();
+            }
+        }
+    }
+
+    // Partial success: each change is validated and applied on its own, in request order, with the same rules and the
+    // same conditional update as a single update. Processing stops at the first exception (for example, the database
+    // is unavailable); changes applied before it stay applied, and the exception propagates.
+    public async Task<IReadOnlyList<BulkStatusChangeResult>> BulkUpdateStatusAsync(
+        IReadOnlyList<BulkStatusChange> changes,
+        string changedBy,
+        CancellationToken cancellationToken)
+    {
+        // One read for the whole batch (only the requested ids). It feeds validation and the history entries;
+        // whether each change applies is still decided by its own conditional update on _id and version.
+        var existing = (await _repository.GetByIdsAsync(changes.Select(x => x.Id).ToList(), cancellationToken))
+            .ToDictionary(x => x.Id);
+
+        var results = new List<BulkStatusChangeResult>(changes.Count);
+        var writes = new WriteTracker();
+        try
+        {
+            foreach (var change in changes)
+            {
+                var result = existing.TryGetValue(change.Id, out var current)
+                    ? await ApplyStatusChangeAsync(current, change.NewStatus, change.ExpectedVersion, changedBy, writes, cancellationToken)
+                    : StatusUpdateResult.NotFound();
+
+                results.Add(new BulkStatusChangeResult(change, result));
+            }
+        }
+        finally
+        {
+            // Once per batch: after at least one successful write, or a write with an unknown outcome,
+            // including when the batch stops early because of an exception.
+            if (writes.PossiblyWritten)
+            {
+                _summaryCache.Invalidate();
+            }
+        }
+
+        _logger.LogInformation(
+            "Bulk status update of {Count} requests: {Updated} updated, {NotFound} not found, {Conflicts} version conflicts, {InvalidTransitions} invalid transitions",
+            results.Count,
+            results.Count(x => x.Result.Outcome == StatusUpdateOutcome.Updated),
+            results.Count(x => x.Result.Outcome == StatusUpdateOutcome.NotFound),
+            results.Count(x => x.Result.Outcome == StatusUpdateOutcome.VersionConflict),
+            results.Count(x => x.Result.Outcome == StatusUpdateOutcome.InvalidTransition));
+
+        return results;
+    }
+
+    // Validates and applies one status change to a request that was read beforehand.
+    // The read only feeds validation and the history entry; the conditional update decides whether the change applies.
+    // The caller invalidates the summary cache when the tracker reports a possible write.
+    private async Task<StatusUpdateResult> ApplyStatusChangeAsync(
+        RequestDocument current,
+        RequestStatus newStatus,
+        int expectedVersion,
+        string changedBy,
+        WriteTracker writes,
+        CancellationToken cancellationToken)
+    {
+        var id = current.Id;
+
         // Checked before the transition: a client holding a stale version must refresh,
         // because judging the transition against a state it has not seen would be meaningless.
         if (current.Version != expectedVersion)
@@ -99,11 +174,12 @@ public sealed class RequestService
         catch
         {
             // Once sent, the update may have been applied even if the call is cancelled or fails before the reply
-            // arrives (the driver does not stop the command on the server). The outcome is unknown, so the summary
-            // is invalidated conservatively; the exception still propagates and no success is reported.
-            _summaryCache.Invalidate();
+            // arrives (the driver does not stop the command on the server). The outcome is unknown, so it is reported
+            // as a possible write (the summary is invalidated conservatively); the exception still propagates.
+            writes.PossiblyWritten = true;
             throw;
         }
+
         if (updated is null)
         {
             // Another write changed (or removed) the request between the read and the update.
@@ -121,8 +197,7 @@ public sealed class RequestService
             return StatusUpdateResult.VersionConflict(latest.Version, latest.Status);
         }
 
-        // Only after the write has succeeded.
-        _summaryCache.Invalidate();
+        writes.PossiblyWritten = true;
 
         _logger.LogInformation(
             "Request {RequestId} status changed from {PreviousStatus} to {NewStatus}, version {Version}",
@@ -180,6 +255,12 @@ public sealed class RequestService
         var now = _timeProvider.GetUtcNow().UtcDateTime;
         var truncated = new DateTime(now.Ticks - now.Ticks % TimeSpan.TicksPerMillisecond, DateTimeKind.Utc);
         return truncated > previousUpdate ? truncated : DateTime.SpecifyKind(previousUpdate, DateTimeKind.Utc);
+    }
+
+    // Set (never cleared) when a write succeeded or may have succeeded, so an operation invalidates the summary once.
+    private sealed class WriteTracker
+    {
+        public bool PossiblyWritten { get; set; }
     }
 
     private static IEnumerable<string> GetActiveFilterNames(RequestQueryParameters query)

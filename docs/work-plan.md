@@ -30,8 +30,20 @@ Estimates are in hours and include implementation and self-review of each task.
 | F1 | Done | Acceptance results below |
 | F2 | Done | API implemented; 25/25 manual checks; 48/48 automated tests. Test tasks T6.1–T6.2 were done here, alongside the API |
 | F3 | Done | Summary endpoint and cache; 67/67 automated tests. Cache tests (part of T6.4) were done here |
-| F4 | Done (pending review) | Status update with optimistic concurrency, history endpoint; 109/109 automated tests. Update tests (part of T6.3) were done here |
-| F5–F9 | Not started | |
+| F4 | Done | Status update with optimistic concurrency, history endpoint; 109/109 automated tests. Update tests (part of T6.3) were done here |
+| F5 | Done (pending review) | Bulk status update with partial success; 140/140 automated tests. Bulk tests (part of T6.4) were done here |
+| F6–F9 | Not started | |
+
+### F5 results
+
+| Check | Result |
+|---|---|
+| Automated tests (`dotnet test`) | 140/140 passed (31 new). The 109 existing tests passed after the service was split and at the end, so `PUT /api/requests/{id}/status` behaves as before |
+| No partial updates for an invalid request | Each structural error case also contains a valid change to a real request; the request returns `400` and that request is unchanged |
+| Concurrency | Two concurrent batches over the same 20 requests: each request updated exactly once (20 `Updated`, 20 `VersionConflict` in total); a batch and a single update on the same request: exactly one succeeds |
+| Cache | Invalidated once per batch with at least one update (or an unknown outcome), and not invalidated for a batch without updates |
+| 100-item batch | About 100 ms within the test run, and about 220–240 ms as the first request after startup (local MongoDB, test database) |
+| Main database | Not written to; the database list was identical before and after the tests |
 
 ### F4 results
 
@@ -134,7 +146,12 @@ Estimates are in hours and include implementation and self-review of each task.
 
 | ID | Task | Deliverable | Depends on | Est. | Req |
 |---|---|---|---|---|---|
-| T5.1 | Bulk status update (up to 100 items), partial success with a per-item result; invalidate the summary cache once if any item was updated | `POST /api/requests/status/bulk`; policy documented | T4.2, T3.2 | 3 | R4, R7 |
+| T5.1 | Split the single update into a read and a shared core (`ApplyStatusChangeAsync`), with one cache invalidation per operation; no behavior change | Shared logic for single and bulk updates | T4.2 | 0.5 | R4, R10 |
+| T5.2 | Batch read (`GetByIdsAsync`, one `$in` query) | Repository method | T5.1 | 0.5 | R4, R6 |
+| T5.3 | Request validation: 1–100 items, item fields, id format, duplicate ids; all before processing | `BulkUpdateStatusRequest` | — | 1 | R4 |
+| T5.4 | Bulk status update (up to 100 items), partial success with a per-item result in request order; stop on the first infrastructure failure; invalidate the summary cache once per batch | `POST /api/requests/status/bulk` | T5.1–T5.3, T3.2 | 2 | R4, R7 |
+| T5.5 | Tests: validation, outcomes, 100/101, cache, concurrent batches | Passing tests | T5.4 | 1.5 | R4, R8 |
+| T5.6 | Documentation: contract, partial-failure policy and its meaning | README section | T5.5 | 1 | R4, R11 |
 
 ## F6 — Automated tests
 
@@ -143,7 +160,7 @@ Estimates are in hours and include implementation and self-review of each task.
 | T6.1 | Test project; integration fixture with `WebApplicationFactory` and an isolated database per run | Test infrastructure | T2.3 | 2 | R8 |
 | T6.2 | Query tests: valid filtering/sorting/paging; invalid parameters | Passing tests | T6.1 | 2 | R8 |
 | T6.3 | Update tests: concurrent update conflict, not found, invalid transition | Passing tests | T6.1, T4.2 | 2 | R8 |
-| T6.4 | Bulk and cache invalidation tests | Passing tests | T6.1, T5.1 | 1.5 | R8 |
+| T6.4 | Bulk and cache invalidation tests | Passing tests | T6.1, T5.4 | 1.5 | R8 |
 
 ## F7 — Performance
 
@@ -213,9 +230,9 @@ flowchart LR
 | F2 Query API | 7.5 |
 | F3 Summary and cache | 8 |
 | F4 Status update and history | 7 |
-| F5 Bulk update | 3 |
+| F5 Bulk update | 6.5 |
 | F6 Automated tests | 7.5 |
 | F7 Performance | 3 |
 | F8 Angular client | 14.5 |
 | F9 Documentation and submission | 5 |
-| **Total** | **66.5** |
+| **Total** | **70** |

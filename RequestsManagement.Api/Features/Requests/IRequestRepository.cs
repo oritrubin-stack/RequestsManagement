@@ -10,6 +10,9 @@ public interface IRequestRepository
 
     Task<RequestDocument?> GetByIdAsync(ObjectId id, CancellationToken cancellationToken);
 
+    // Reads only the given requests (without history) in one query; missing ids are simply absent from the result.
+    Task<IReadOnlyList<RequestDocument>> GetByIdsAsync(IReadOnlyCollection<ObjectId> ids, CancellationToken cancellationToken);
+
     Task<RequestSummaryCounts> GetSummaryAsync(CancellationToken cancellationToken);
 
     // Applies the status change only if the request still has the expected version.

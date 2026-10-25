@@ -15,6 +15,9 @@ public sealed class RequestsController : ControllerBase
     public const string ChangedByHeader = "X-User-Name";
 
     private const string ChangedByPattern = "^[A-Za-z0-9._@-]+$";
+    private const string ChangedByRequiredMessage = "The X-User-Name header is required.";
+    private const string ChangedByLengthMessage = "X-User-Name must be at most 100 characters.";
+    private const string ChangedByPatternMessage = "X-User-Name may contain only letters, digits and . _ @ -";
 
     private readonly RequestService _service;
 
@@ -69,9 +72,9 @@ public sealed class RequestsController : ControllerBase
         string id,
         [FromBody] UpdateStatusRequest request,
         [FromHeader(Name = ChangedByHeader)]
-        [Required(ErrorMessage = "The X-User-Name header is required.")]
-        [StringLength(100, ErrorMessage = "X-User-Name must be at most 100 characters.")]
-        [RegularExpression(ChangedByPattern, ErrorMessage = "X-User-Name may contain only letters, digits and . _ @ -")]
+        [Required(ErrorMessage = ChangedByRequiredMessage)]
+        [StringLength(100, ErrorMessage = ChangedByLengthMessage)]
+        [RegularExpression(ChangedByPattern, ErrorMessage = ChangedByPatternMessage)]
         string changedBy,
         CancellationToken cancellationToken)
     {
@@ -119,6 +122,37 @@ public sealed class RequestsController : ControllerBase
         }
     }
 
+    // Partial success: each item is applied on its own with the same rules as PUT /{id}/status, and gets its own result
+    // (in request order). A structurally invalid request (more than 100 items, invalid or duplicate ids, invalid fields)
+    // is rejected with 400 before any item is processed. If the database fails mid-batch, processing stops and the
+    // error propagates; items applied before it stay applied (see README).
+    [HttpPost("status/bulk")]
+    [ProducesResponseType(typeof(BulkUpdateStatusResponse), StatusCodes.Status200OK, "application/json")]
+    [ProducesResponseType(typeof(ValidationProblemDetails), StatusCodes.Status400BadRequest, "application/problem+json")]
+    public async Task<ActionResult<BulkUpdateStatusResponse>> BulkUpdateStatus(
+        [FromBody] BulkUpdateStatusRequest request,
+        [FromHeader(Name = ChangedByHeader)]
+        [Required(ErrorMessage = ChangedByRequiredMessage)]
+        [StringLength(100, ErrorMessage = ChangedByLengthMessage)]
+        [RegularExpression(ChangedByPattern, ErrorMessage = ChangedByPatternMessage)]
+        string changedBy,
+        CancellationToken cancellationToken)
+    {
+        // Model validation has already checked every item, so the ids parse and the values are present.
+        var changes = request.Items!
+            .Select(item => new BulkStatusChange(ObjectId.Parse(item.Id), item.Status!.Value, item.ExpectedVersion!.Value))
+            .ToList();
+
+        var results = await _service.BulkUpdateStatusAsync(changes, changedBy, cancellationToken);
+
+        return Ok(new BulkUpdateStatusResponse(
+            results.Count(x => x.Result.Outcome == StatusUpdateOutcome.Updated),
+            results.Count(x => x.Result.Outcome == StatusUpdateOutcome.NotFound),
+            results.Count(x => x.Result.Outcome == StatusUpdateOutcome.VersionConflict),
+            results.Count(x => x.Result.Outcome == StatusUpdateOutcome.InvalidTransition),
+            results.Select(ToItemResult).ToList()));
+    }
+
     // Returns the status changes in chronological order; an empty array when the request has none.
     [HttpGet("{id}/history")]
     [ProducesResponseType(typeof(IReadOnlyList<StatusChangeDto>), StatusCodes.Status200OK, "application/json")]
@@ -144,6 +178,29 @@ public sealed class RequestsController : ControllerBase
 
         ModelState.AddModelError(nameof(id), "The id must be a 24-character hexadecimal string.");
         return false;
+    }
+
+    private static BulkUpdateStatusItemResult ToItemResult(BulkStatusChangeResult item)
+    {
+        var id = item.Change.Id.ToString();
+        var result = item.Result;
+
+        return result.Outcome switch
+        {
+            StatusUpdateOutcome.Updated => new BulkUpdateStatusItemResult(id, result.Outcome, Request: result.Request),
+            StatusUpdateOutcome.NotFound => new BulkUpdateStatusItemResult(id, result.Outcome),
+            StatusUpdateOutcome.InvalidTransition => new BulkUpdateStatusItemResult(
+                id,
+                result.Outcome,
+                CurrentVersion: result.CurrentVersion,
+                CurrentStatus: result.CurrentStatus,
+                Message: DescribeInvalidTransition(result.CurrentStatus!.Value, item.Change.NewStatus)),
+            _ => new BulkUpdateStatusItemResult(
+                id,
+                result.Outcome,
+                CurrentVersion: result.CurrentVersion,
+                CurrentStatus: result.CurrentStatus)
+        };
     }
 
     private static string DescribeInvalidTransition(RequestStatus currentStatus, RequestStatus newStatus)

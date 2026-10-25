@@ -56,6 +56,15 @@ public sealed class RequestRepository : IRequestRepository
             .Project<RequestDocument>(WithoutHistory)
             .FirstOrDefaultAsync(cancellationToken);
 
+    // One $in query on _id (uses the primary key index); the bulk update reads at most 100 requests this way.
+    public async Task<IReadOnlyList<RequestDocument>> GetByIdsAsync(
+        IReadOnlyCollection<ObjectId> ids,
+        CancellationToken cancellationToken) =>
+        await _collection
+            .Find(Filter.In(x => x.Id, ids))
+            .Project<RequestDocument>(WithoutHistory)
+            .ToListAsync(cancellationToken);
+
     // Both groupings are computed by one $facet stage from the same collection scan.
     // This scans the whole collection (no index helps a full grouping), which is why the result is cached.
     // It is not a point-in-time snapshot: concurrent writes may or may not be reflected (snapshot reads need a replica set).

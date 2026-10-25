@@ -1,3 +1,4 @@
+using MongoDB.Bson;
 using RequestsManagement.Api.Domain;
 using RequestsManagement.Api.Features.Requests.Dtos;
 
@@ -31,3 +32,9 @@ public sealed record StatusUpdateResult(
     public static StatusUpdateResult InvalidTransition(int currentVersion, RequestStatus currentStatus) =>
         new(StatusUpdateOutcome.InvalidTransition, CurrentVersion: currentVersion, CurrentStatus: currentStatus);
 }
+
+// One requested change in a bulk update, after request validation (the id is already parsed).
+public sealed record BulkStatusChange(ObjectId Id, RequestStatus NewStatus, int ExpectedVersion);
+
+// The outcome of one bulk item, in the order of the request.
+public sealed record BulkStatusChangeResult(BulkStatusChange Change, StatusUpdateResult Result);

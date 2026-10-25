@@ -219,6 +219,9 @@ public sealed class RequestServiceStatusUpdateTests
         public Task<RequestDocument?> GetByIdAsync(ObjectId id, CancellationToken cancellationToken) =>
             Task.FromResult(Reads.Dequeue());
 
+        public Task<IReadOnlyList<RequestDocument>> GetByIdsAsync(IReadOnlyCollection<ObjectId> ids, CancellationToken cancellationToken) =>
+            throw new NotSupportedException();
+
         public Task<RequestDocument?> TryUpdateStatusAsync(
             ObjectId id,
             int expectedVersion,
