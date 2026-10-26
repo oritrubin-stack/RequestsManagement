@@ -3,8 +3,9 @@
 A full-stack system for managing requests submitted by organizations and employers.
 Built as a Full Stack take-home assignment.
 
-> **Status:** work in progress. Sections marked _TBD_ are filled in as the related tasks are completed.
-> See the [work plan](docs/work-plan.md) for the task breakdown, order and estimates.
+> The API, the Angular client, the automated tests and the documentation are complete.
+> Known limitations are listed at the end. The [work plan](docs/work-plan.md) shows the task breakdown, order,
+> estimates and the verification results of each stage; [docs/performance.md](docs/performance.md) has the performance measurements.
 
 ---
 
@@ -13,10 +14,11 @@ Built as a Full Stack take-home assignment.
 | Component | Technology | Version |
 |---|---|---|
 | Backend | ASP.NET Core Web API | .NET 8 (SDK 8.0.x, see `global.json`) |
-| Frontend | Angular | 19 (_TBD_) |
+| Frontend | Angular (standalone components), RxJS, TypeScript | Angular 19.2 (packages 19.2.25), RxJS 7.8, TypeScript 5.7 |
 | Database | MongoDB | 4.4+ (developed against 5.0.9, standalone) |
 | MongoDB driver | MongoDB.Driver | 3.12.0 |
-| Tests | xUnit | _TBD_ |
+| API tests | xUnit, `WebApplicationFactory` | xUnit 2.9.3, Microsoft.AspNetCore.Mvc.Testing 8.0.32 |
+| Client tests | Jasmine, Karma (headless Chrome) | Jasmine 5.6, Karma 6.4 |
 
 MongoDB.Driver 3.10–3.12 is fully compatible with MongoDB Server 4.4 through 9.0 and with .NET 8, according to the
 official [compatibility tables](https://www.mongodb.com/docs/drivers/compatibility/). MongoDB 4.2 is not supported by this driver version.
@@ -24,8 +26,9 @@ official [compatibility tables](https://www.mongodb.com/docs/drivers/compatibili
 ## Prerequisites
 
 - .NET 8 SDK (any 8.0.x feature band; `global.json` rolls forward within .NET 8)
-- Node.js 22 and Angular CLI 19 (for the client)
-- A running MongoDB instance (standalone is sufficient; no replica set is required)
+- Node.js 22 with npm (for the client). A global Angular CLI is not needed: the npm scripts use the project's local CLI.
+- Google Chrome, only for running the client tests (Karma uses headless Chrome)
+- A running MongoDB instance on `localhost:27017` (standalone is sufficient; no replica set is required)
 
 ## Getting started
 
@@ -65,10 +68,39 @@ dotnet run --project RequestsManagement.Api -- --seed
 ```bash
 dotnet build RequestsManagement.sln
 dotnet run --project RequestsManagement.Api
-# Swagger UI: http://localhost:5114/swagger
+# API: http://localhost:5114   Swagger UI: http://localhost:5114/swagger
 ```
 
+`dotnet run` uses the `http` launch profile (Development environment, port 5114).
 On startup the API ensures that all indexes exist. This is idempotent.
+
+### Run the client
+
+In a second terminal, with the API running:
+
+```bash
+cd client
+npm ci       # installs the exact versions in package-lock.json
+npm start    # http://localhost:4200
+```
+
+The Angular dev server proxies `/api` to the API at `http://localhost:5114` ([client/proxy.conf.json](client/proxy.conf.json)),
+so the browser calls the same origin and no CORS configuration is needed in development. A production deployment would
+serve the client and the API from the same origin, or add a CORS policy to the API (not configured).
+
+### Run the tests
+
+```bash
+dotnet test RequestsManagement.sln                       # API: unit and integration tests (needs local MongoDB)
+cd client && npx ng test --watch=false --browsers=ChromeHeadless   # client
+```
+
+### Verified clean run
+
+On 2026-10-26, a copy containing only the files tracked by git (no `bin`, `obj`, `node_modules` or `dist`) was set up
+from scratch: `npm ci`, the client tests (59 passed) and production build, `dotnet build` (0 warnings),
+`dotnet test` (140 passed), and the commands above (`dotnet run` and `npm start`, with list and summary requests
+through the proxy) all worked.
 
 ## Solution structure
 
@@ -86,14 +118,31 @@ RequestsManagement.Api/
 RequestsManagement.Api.Tests/
 ├── Infrastructure/             # WebApplicationFactory, MongoDB test database fixture
 ├── Integration/                # HTTP tests against the real API and MongoDB
-└── Unit/                       # Domain rules, query parameter validation, data generator
-```
+└── Unit/                       # Domain rules, validation, cache, service logic, data generator
 
-_TBD_ — client project.
+client/src/app/
+├── core/
+│   ├── api/                    # RequestsApiService (the only HTTP access) and error messages
+│   ├── models/                 # API contract types; UI copy of the status transition policy
+│   └── user/                   # The X-User-Name value and its input field
+└── features/requests/          # Page (state and RxJS pipeline), filters, table, pager, summary, details, bulk bar
+
+docs/                           # Work plan and performance measurements
+tools/perf/                     # Read-only measurement scripts (query plans, HTTP latency)
+```
 
 ## Database choice and data model
 
-_TBD_ — why MongoDB over SQL Server.
+**Why MongoDB (the assignment allowed SQL Server, MongoDB or another option):**
+- **One request is one document.** Its status history is embedded in it, so a status change, its version increment
+  and its audit entry are written in a single atomic operation. On a standalone server this needs no transaction.
+- **Optimistic concurrency fits a conditional update:** `findOneAndUpdate` filtered on `_id` and `version`.
+- **Server-side work is available without extra components:** compound indexes for filtering and sorting,
+  a text index for search, and aggregation pipelines for the summary.
+- **A local MongoDB server was already available** on the development machine.
+
+With SQL Server, the same design would use a `rowversion` column for concurrency, a separate history table written
+in a transaction, and `GROUP BY` queries for the summary.
 
 Each request is a single document in the `requests` collection. Its status history is embedded in the same document:
 
@@ -595,8 +644,8 @@ Expected results are computed in memory from the same 500 seeded documents and c
 | `DatabaseUnavailableTests` | `503` ProblemDetails when MongoDB is unreachable (list, get by id, summary, history, status update, bulk update). This uses the real failure path: the driver's server selection times out on an unused local port, and the global handler maps the exception to 503 |
 
 **Read and write tests use separate databases.** The read-only tests compare responses with the seeded documents,
-so the tests that change data (`RequestsStatusUpdateTests`) run in their own test collection, which creates a
-separate test database. Each write test creates the requests it changes.
+so the tests that change data (`RequestsStatusUpdateTests` and `RequestsBulkStatusUpdateTests`) run in their own test
+collection, which creates a separate test database. Each write test creates the requests it changes.
 
 **Test database safety.** Each run uses a new database named `RequestsManagement_Tests_<guid>` on the local server.
 The database is dropped at the end only when all of the following hold:
@@ -623,9 +672,74 @@ Otherwise the database is left in place and a message is written.
 **TTL tests do not wait.** They use a real `MemoryCache` with a manual clock (`MemoryCacheOptions.Clock`)
 that the test moves forward, so expiration is deterministic.
 
+**Result: 140 API tests passed** (latest run on 2026-10-26).
+
+### Client tests
+
+59 tests, run with `npx ng test --watch=false --browsers=ChromeHeadless` (latest run on 2026-10-26: all passed).
+HTTP is simulated with `HttpTestingController`; time is controlled with `fakeAsync`.
+
+| Test file | Covers |
+|---|---|
+| `requests-api.service.spec.ts` | Query parameters (empty filters omitted, search trimmed), URLs and id encoding, `PUT` body with `expectedVersion` and the `X-User-Name` header, `409` body passed through, bulk body and header |
+| `requests-page.component.spec.ts` | First page with default parameters; **search debounced (one request after 300 ms)**; **a request in flight is cancelled when the criteria change or a newer search starts (`switchMap`)**; back to page 1 on filter, sort or page-size changes; server-side sorting and paging; date range sent as half-open UTC; empty state with one-request "clear filters"; error state with retry; validation messages; opening details keeps the list; after an update the same page is reloaded and the summary refreshed; bulk selection count, clearing and reload |
+| `request-details.component.spec.ts` | Request and history loaded together, history in chronological order, empty history; only allowed targets offered; user name required; update sends the loaded version and the header; **`409` shows the current status and version, locks the form, is not retried, and "Reload" unlocks it**; `400`, `404` and `503`; a failed load; cancelling a load when another request is selected |
+| `bulk-status-bar.component.spec.ts` | Selected count; target status and user name required; policy hint; every id with its loaded version and the header are sent; **each item is shown as the server reported it, even though the response is HTTP 200**; no second request while one is in progress; a failed batch is reported as possibly partial (`503`), a validation error is not (`400`); results stay visible until dismissed |
+| `summary-panel.component.spec.ts` | Counts by status and priority; refresh keeps the previous counts visible; error with retry |
+| `requests-list.models.spec.ts`, `status-transitions.spec.ts`, `current-user.service.spec.ts`, `http-error.spec.ts`, `app.component.spec.ts` | Selection limited to 100; the UI copy of the transition policy; user name storage and validation; error messages; the app shell |
+
+The tests for debounce, cancellation, the version sent and the `409` lock were checked by temporarily breaking the
+code (for example replacing `switchMap` with `mergeMap`): each change made the corresponding tests fail.
+
+## Angular client
+
+**Server-side only.** Search, filters, sorting and paging are sent to `GET /api/requests`; the client never filters,
+sorts or pages locally.
+
+| Feature | Behavior |
+|---|---|
+| **Search** | Debounced by 300 ms. A search that differs only by surrounding spaces is not sent again |
+| **Filters** | Status, priority, organization and assignee (exact, sent when the field changes), and a date range. The "to" day is inclusive in the UI and sent as the start of the next day (`[from, to)` in UTC) |
+| **Cancellation** | Each new query cancels the HTTP request still in flight (`switchMap`) |
+| **Paging** | Previous/next and page size (10–100). Changing the search, a filter, the sort or the page size returns to page 1 |
+| **States** | Loading (the previous page stays visible, dimmed), empty (with "Clear filters"), and error (the server's message and "Try again") |
+| **Summary** | Counts by status and priority with the time they were computed; refreshed after successful updates |
+| **Details and history** | Opening a request does not change the list. The history is loaded with the request, in chronological order |
+
+**User name.** The field at the top of the page provides the `X-User-Name` header for status changes and is recorded
+as `changedBy` in the history. It is stored in the browser (`localStorage`). **It is not a login and is not
+verified:** the page says so next to the field.
+
+**Single status update.** The details panel offers only the transitions the policy allows (a copy of the server
+policy, for convenience; the server remains the authority) and sends the version that was last loaded:
+
+| Response | What the client does |
+|---|---|
+| `200` | Shows the new status and version, reloads the history, the current list page and the summary |
+| `409` | Shows the current status and version. **No automatic retry:** the form stays locked until the user reloads the request |
+| `400` | Shows the server's validation message |
+| `404` | Reports that the request no longer exists and reloads the list |
+| `503` or network error | Shows the error; the user can try again |
+
+**Bulk status update.** Rows of the current page can be selected (at most 100; the selection is cleared when the page,
+the filters, the sort or the page size change, so every selected row is shown with the version that was last loaded).
+The client sends each selected id with its version and one target status, then shows **a result for each item as
+the server reported it** (updated, not found, changed by someone else, transition not allowed) with the counts.
+An HTTP 200 does not mean that every item was updated. After a completed batch the selection is cleared and the list
+and summary are reloaded. If the whole request fails (`503` or a network error), the client warns that some items may
+already have been updated, reloads the data and keeps the selection; resending is safe, because an item that was
+already applied is reported as a conflict or an invalid transition instead of being applied twice.
+
 ## Technical decisions and alternatives
 
-_TBD_ — at least two significant decisions and the alternatives considered.
+| Decision | Chosen | Alternatives considered | Reason |
+|---|---|---|---|
+| **Audit history storage** | Embedded in the request document, written by the same atomic update | A separate history collection written in a multi-document transaction | Transactions need a replica set; the embedded history keeps the status, version and audit entry consistent on a standalone server. Trade-off: the document grows with each change, and history queries across requests need `$unwind` |
+| **Optimistic concurrency** | A `version` field, sent as `expectedVersion` in the body, and a conditional `findOneAndUpdate` on `_id` + `version` | `If-Match` with an ETag; read-modify-write without a condition | The assignment requires `409` for a conflict, while a failed `If-Match` is `412` in HTTP. A condition inside the atomic update is what prevents lost updates; a read before the write only narrows the window |
+| **Bulk failure policy** | Partial success with a result per item | All-or-nothing | All-or-nothing needs a transaction (a replica set), and one conflict would discard every valid change. Retrying a partially applied batch is safe because of the version check |
+| **Summary cache** | `IMemoryCache` per API instance, 30-second absolute expiration, invalidated after writes, single-flight | A shared Redis cache | No extra infrastructure. The limitation (other instances can be stale for up to 30 seconds) is documented, with Redis or pub/sub invalidation as the scale-out path |
+| **Text search** | A MongoDB text index (`$text`) on title and organization | A case-insensitive regex; Atlas Search | The regex cannot use an index (its total count took 450 ms against 61 ms with `$text`); Atlas Search is not available on a local server. Trade-off: whole words only |
+| **Development CORS** | Angular dev-server proxy | A CORS policy in the API | No API change is needed for local development |
 
 ## Assumptions
 
@@ -664,9 +778,47 @@ The value is stored in the history but not written to the logs.
 - **A `503` on a status update has an unknown outcome.** The update may have been applied; clients should reload the request.
 - **A bulk update is not atomic.** Items are applied independently (partial success); after a `503`, items processed
   before the failure stay applied.
+- **The summary cache is per API instance.** Other instances can serve counts that are up to 30 seconds old.
+- **Deep pages are slow** (`skip`): about 190 ms for page 2,500 over HTTP, against about 8 ms for the first page.
+- **No authentication or authorization**, and no CORS policy for a production deployment.
+- **Bulk selection covers the current page only** (up to 100 rows).
+- **The client's single status change was also exercised manually by the author** against the local database
+  (three status changes on 2026-10-26; the stored history and versions stayed consistent). The bulk update screen and
+  the `409`/error flows were verified with automated tests only.
 
-_TBD_
+**Possible improvements:**
+- **Keyset (cursor) pagination** for deep pages; measured with `explain` at 20 keys per page at every position
+  ([performance](docs/performance.md#7-bottlenecks-and-proposed-improvements)).
+- **Authentication,** with `changedBy` taken from the user's claims instead of a header.
+- **A shared cache or invalidation messages** (for example Redis) when running several API instances.
+- **A search engine** (for example Atlas Search) for partial-word search with ranking.
+- **End-to-end browser tests** of the client against an isolated test database.
 
 ## Use of AI tools
 
-_TBD_ — which parts were AI-assisted and what was reviewed or changed manually.
+The project was developed with **Claude Code** (an AI coding assistant by Anthropic), directed by the author.
+
+**How the work was done:**
+- **The author set the requirements and decided** the technology choices (for example MongoDB, plain CSS without a
+  component library, the dev proxy) and the design questions the assistant raised at each stage (for example the
+  transition policy, the bulk failure policy, the cache design and the test isolation rules).
+- **The assistant proposed plans, wrote the code, the tests and the documentation, and ran the builds, tests and
+  measurements.** The work was split into stages (F0–F9). Each stage was presented as a plan, implemented only after
+  the author's approval, reviewed in a report, and committed only after the author's explicit approval.
+- **Guardrails set by the author:** no package installation without approving exact versions, no writes by the
+  assistant to the main database outside the deterministic seeder, isolated test databases with checked cleanup, and
+  no claims about tests that were not run.
+
+**What was checked, and what changed as a result:**
+- **Every reported result comes from an actual run** (builds, 140 API tests, 59 client tests, query plans, HTTP
+  latency). The results are recorded in the [work plan](docs/work-plan.md).
+- **Tests were checked against deliberately broken code** (for example, removing the version from the update filter,
+  removing single-flight from the cache, removing the debounce): each change made the corresponding tests fail.
+- **Reviews requested by the author found and fixed issues, for example:**
+  - error responses returned with the wrong content type, and `500`/`503` responses without a `traceId`;
+  - computed properties leaking into the OpenAPI description;
+  - a race in the cache between computing and invalidating the summary;
+  - internal type names exposed in JSON error messages;
+  - documentation statements that overstated guarantees (a consistent snapshot, "never stale").
+- **The author is responsible for all submitted code.** The project instructions given to the assistant are in
+  [CLAUDE.md](CLAUDE.md).

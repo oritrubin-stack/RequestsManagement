@@ -33,8 +33,27 @@ Estimates are in hours and include implementation and self-review of each task.
 | F4 | Done | Status update with optimistic concurrency, history endpoint; 109/109 automated tests. Update tests (part of T6.3) were done here |
 | F5 | Done | Bulk status update with partial success; 140/140 automated tests. Bulk tests (part of T6.4) were done here |
 | F6 | Done (within F2–F5) | The test tasks were completed together with the features they test; 140 automated tests |
-| F7 | Done (pending review) | `docs/performance.md`; read-only measurement scripts in `tools/perf` |
-| F8–F9 | Not started | |
+| F7 | Done | `docs/performance.md`; read-only measurement scripts in `tools/perf` |
+| F8 | Done (pending review) | Angular client: list, filters, search, sorting, paging, summary, details, history, single and bulk status updates; 59 client tests |
+| F9 | In progress | README completed, AI usage section, clean-run verification (T9.1–T9.3). Publishing the repository (T9.4) is left to the author |
+
+### F9 results
+
+| Check | Result |
+|---|---|
+| Clean run (copy of the files tracked by git, without `bin`, `obj`, `node_modules`, `dist`) | `npm ci` reproduced `package-lock.json` exactly (Angular 19.2.25); client tests 59/59; client production build succeeded; `dotnet build` 0 warnings, 0 errors; `dotnet test` 140/140 |
+| Run instructions | `dotnet run --project RequestsManagement.Api` listened on `http://localhost:5114` with Swagger; `npm start` served `http://localhost:4200`; list and summary requests through the proxy returned 100,000 requests (read-only) |
+| Generated files | `client/README.md` (Angular CLI template, superseded by the main README) removed; `client/.vscode` kept (debug and task settings for VS Code) |
+
+### F8 results
+
+| Check | Result |
+|---|---|
+| Client tests (`ng test`, headless Chrome) | 59/59, no warnings |
+| Client build | Production build succeeded (238 kB initial, 69 kB transferred) |
+| Tests detect regressions | Replacing `switchMap` with `mergeMap`, removing the debounce, removing the `409` form lock, sending a fixed version, or removing the in-flight guard each made the corresponding tests fail |
+| Against the real API (read-only by the assistant; one manual write check by the author) | List, summary, filters and layout at desktop width and at a 390 px viewport. Bulk updates and the `409`/error flows were verified only by automated tests. Single status changes were also checked manually by the author (three changes on 2026-10-26). The assistant did not write to the main database. |
+| API unchanged | No API change; development uses the Angular dev-server proxy instead of CORS. Backend tests 140/140 |
 
 ### F7 results
 
@@ -186,13 +205,14 @@ Estimates are in hours and include implementation and self-review of each task.
 
 | ID | Task | Deliverable | Depends on | Est. | Req |
 |---|---|---|---|---|---|
-| T8.1 | Create the Angular project; API base URL configuration; CORS on the API | Running client shell | T2.3 | 1.5 | R5 |
+| T8.1 | Create the Angular project; API base URL through the dev-server proxy (no CORS change in the API) | Running client shell | T2.3 | 1.5 | R5 |
 | T8.2 | API service and client models | `RequestsApiService` | T8.1 | 1.5 | R5 |
 | T8.3 | Requests list: filters, debounced search, request cancellation (`switchMap`), sorting, paging, loading/empty/error states | List page | T8.2 | 5 | R5 |
 | T8.4 | Summary panel | Aggregations view | T8.2, T3.1 | 1 | R5 |
-| T8.5 | Status update with 409 conflict handling | Update flow | T8.3, T4.2 | 2.5 | R5 |
+| T8.5 | Status update with 409 conflict handling; user name field for `X-User-Name` | Update flow | T8.3, T4.2 | 2.5 | R5 |
 | T8.6 | Status history view | History view | T8.3, T4.3 | 1.5 | R5 |
-| T8.7 | Client tests for the API service (optional) | Passing tests | T8.2 | 1.5 | R8 |
+| T8.7 | Client tests: API service, list (debounce, cancellation, states), details (`409`), summary, bulk | Passing tests | T8.2 | 1.5 | R8 |
+| T8.8 | Bulk status update: selection of the current page (at most 100), result per item, reload after the batch (added: missing from the original plan) | Bulk update flow | T8.3, T5.4 | 1.5 | R4, R5 |
 
 ## F9 — Documentation and submission
 
@@ -200,8 +220,8 @@ Estimates are in hours and include implementation and self-review of each task.
 |---|---|---|---|---|---|
 | T9.1 | Complete README: run instructions, structure, indexes, concurrency, bulk, cache, decisions, limitations | Final README | All features | 3 | R11 |
 | T9.2 | AI usage section | README section | T9.1 | 0.5 | R11 |
-| T9.3 | Clean-run verification from a fresh clone | Verified instructions | T9.1 | 1 | R11 |
-| T9.4 | Publish the repository | Accessible repository link | T9.3 | 0.5 | Submission |
+| T9.3 | Clean-run verification from a copy of the tracked files (a fresh clone after the final commit) | Verified instructions | T9.1 | 1 | R11 |
+| T9.4 | Publish the repository (by the author) | Accessible repository link | T9.3 | 0.5 | Submission |
 
 ---
 
@@ -246,6 +266,6 @@ flowchart LR
 | F5 Bulk update | 6.5 |
 | F6 Automated tests | 7.5 |
 | F7 Performance | 4 |
-| F8 Angular client | 14.5 |
+| F8 Angular client | 16 |
 | F9 Documentation and submission | 5 |
-| **Total** | **71** |
+| **Total** | **72.5** |
