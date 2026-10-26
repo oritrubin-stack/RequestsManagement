@@ -31,8 +31,20 @@ Estimates are in hours and include implementation and self-review of each task.
 | F2 | Done | API implemented; 25/25 manual checks; 48/48 automated tests. Test tasks T6.1–T6.2 were done here, alongside the API |
 | F3 | Done | Summary endpoint and cache; 67/67 automated tests. Cache tests (part of T6.4) were done here |
 | F4 | Done | Status update with optimistic concurrency, history endpoint; 109/109 automated tests. Update tests (part of T6.3) were done here |
-| F5 | Done (pending review) | Bulk status update with partial success; 140/140 automated tests. Bulk tests (part of T6.4) were done here |
-| F6–F9 | Not started | |
+| F5 | Done | Bulk status update with partial success; 140/140 automated tests. Bulk tests (part of T6.4) were done here |
+| F6 | Done (within F2–F5) | The test tasks were completed together with the features they test; 140 automated tests |
+| F7 | Done (pending review) | `docs/performance.md`; read-only measurement scripts in `tools/perf` |
+| F8–F9 | Not started | |
+
+### F7 results
+
+| Check | Result |
+|---|---|
+| API latency on 100,000 requests (Release, 30 requests after 5 warm-up) | List p50: first page 7.7 ms, filter 10.4 ms, text search 85.7 ms, page 2,500 188.0 ms; summary 1.1 ms from the cache and 670.4 ms computed (10 requests) |
+| Index vs forced collection scan (`hint({$natural: 1})`, indexes unchanged) | 20 keys / 0–1 ms with the index, 100,000 documents / 261–321 ms forced scan |
+| Bottleneck | Deep pagination: 152 ms at position 50,000; keyset examined 20 keys at every position (proposed, not implemented) |
+| Main database | Read-only: the API ran with `EnsureIndexesOnStartup=false`; the database matches the F1 baseline afterwards |
+| Limitations | One machine under memory pressure (676–733 MB free during the HTTP measurements, 1,326 MB before the explain run), single client, no network latency; bulk timing is from the test database (about 500 requests), not from 100,000 |
 
 ### F5 results
 
@@ -85,7 +97,7 @@ Estimates are in hours and include implementation and self-review of each task.
 | A4 | Seed 100,000 requests | Passed: 100,000 documents in 5.6–15.2 s across six runs, including index creation; the slower runs coincided with high memory pressure on the machine |
 | A5 | Consistency rules I1–I6 | Passed: 0 violations across 100,000 documents |
 | A6 | Non-uniform distribution | Passed: status Completed 35,036 / InProgress 30,134 / New 19,897 / Waiting 14,933; priority Low 40,169 / Medium 39,746 / High 20,085 |
-| A7 | Indexes | Passed: `_id` plus the 7 planned indexes; 19.37 MiB in total (2.45–2.57 MiB per B-tree index, 4.36 MiB for the text index). The collection's storage size was not yet reported correctly after the bulk load and will be re-measured in F7 |
+| A7 | Indexes | Passed: `_id` plus the 7 planned indexes; 19.37 MiB in total (2.45–2.57 MiB per B-tree index, 4.36 MiB for the text index). The collection's storage size was not yet reported correctly after the bulk load; re-measured in F7: 11.00 MiB on disk, `_id_` 0.95 MiB, all indexes 20.32 MiB |
 | A8 | Repeatability | Passed: identical counts, distributions and checksums (sum of `createdAt`, `updatedAt`, `version`) across two runs |
 | A9 | Normal startup, twice | Passed: indexes ensured idempotently; Swagger returned HTTP 200 on both runs |
 | A10 | Other databases untouched | Passed: user databases unchanged in size and document count. MongoDB's internal `config.system.sessions` changed, which is expected server behavior when a client connects |
@@ -166,8 +178,9 @@ Estimates are in hours and include implementation and self-review of each task.
 
 | ID | Task | Deliverable | Depends on | Est. | Req |
 |---|---|---|---|---|---|
-| T7.1 | Measure two key operations (filtered list, summary) on 100,000 records using `explain("executionStats")`, before and after indexes | `docs/performance.md` with measurements | T1.4, T2.2, T3.1 | 2 | R6 |
-| T7.2 | Identify a bottleneck and propose an improvement | Section in `docs/performance.md` | T7.1 | 1 | R6 |
+| T7.1 | Measure two key operations (list with filter and text search, summary cold and warm) on 100,000 records over HTTP (p50/p95) and with `explain("executionStats")`; compare with a forced collection scan (`hint({$natural: 1})`) instead of dropping indexes | `docs/performance.md` with measurements; read-only scripts in `tools/perf` | T1.4, T2.2, T3.1 | 2 | R6 |
+| T7.2 | Identify a bottleneck and propose an improvement (deep pagination: skip vs keyset, measured with `explain`) | Section in `docs/performance.md` | T7.1 | 1 | R6 |
+| T7.3 | Documentation: method, environment, limitations, reproduction; README summary | `docs/performance.md`, README | T7.2 | 1 | R6, R11 |
 
 ## F8 — Angular client
 
@@ -232,7 +245,7 @@ flowchart LR
 | F4 Status update and history | 7 |
 | F5 Bulk update | 6.5 |
 | F6 Automated tests | 7.5 |
-| F7 Performance | 3 |
+| F7 Performance | 4 |
 | F8 Angular client | 14.5 |
 | F9 Documentation and submission | 5 |
-| **Total** | **70** |
+| **Total** | **71** |

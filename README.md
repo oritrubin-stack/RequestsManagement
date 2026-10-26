@@ -150,15 +150,19 @@ Sizes are measured on 100,000 seeded documents, in MiB (1 MiB = 1,048,576 bytes)
 | `ix_assignedTo_createdAt_id` | `assignedTo: 1, createdAt: -1, _id: -1` | Filter by assignee | 2.55 |
 | `ix_organizationName_createdAt_id` | `organizationName: 1, createdAt: -1, _id: -1` | Exact-match filter by organization | 2.57 |
 | `ix_text_title_organizationName` | text on `title`, `organizationName`; `default_language: none` | Free-text search | 4.36 |
-| **Total (all indexes)** | | | **19.37** |
+| **Total (these 7 indexes)** | | | **19.37** |
+
+With the primary key index `_id_` (0.95 MiB), all indexes take 20.32 MiB, and the collection takes 11.00 MiB on disk
+(compressed), measured on 2026-10-25 ([performance](docs/performance.md#6-indexes-and-storage)).
 
 **Cost:**
-- **Inserts:** each insert writes 8 index entries (7 plus `_id`). The text index costs the most, because it writes one entry per word.
+- **Inserts:** each insert writes one entry in each of the 6 single-key indexes and `_id`, plus one entry per word of
+  `title` and `organizationName` in the text index, so the text index costs the most.
 - **Status updates:** a status update touches only the indexes that contain changed fields: `ix_status_createdAt_id` and `ix_updatedAt_id`.
   `version` and `statusHistory` are not indexed.
 
 **Combined filters:** MongoDB uses one index and applies the remaining conditions as a residual filter.
-The effectiveness of each index is verified with `explain("executionStats")` in the performance phase.
+The effectiveness of the indexes is verified with `explain("executionStats")`; see [Performance](#performance).
 No additional index is added without a measured justification.
 
 ## Querying: pagination, filtering, sorting and search
@@ -542,7 +546,22 @@ Ways to synchronize when running several instances:
 
 ## Performance
 
-_TBD_ — see `docs/performance.md`.
+Measured on 100,000 requests (Release build, local MongoDB). Details, query plans, method and limitations are in
+[docs/performance.md](docs/performance.md); the measurement scripts are in [tools/perf](tools/perf).
+
+| Operation | HTTP latency p50 / p95 |
+|---|---|
+| List, first page | 7.7 / 18.1 ms |
+| List, status + date-range filter | 10.4 / 19.8 ms |
+| List, text search | 85.7 / 112.2 ms |
+| List, page 2,500 (skip 49,980) | 188.0 / 235.3 ms |
+| Summary, from the cache / computed | 1.1 / 1.5 ms, and 670.4 / 715.7 ms |
+
+- **Indexes:** the indexed queries examine only the 20 entries of a page. Forced to a collection scan, the same
+  queries examine 100,000 documents and take 261–321 ms.
+- **Main bottleneck: deep pagination.** `skip` walks every skipped index key (152 ms at position 50,000).
+  Keyset pagination examined 20 keys at every position in the same test; it is proposed, not implemented.
+- **Summary:** a full scan of about 0.67 s, served from the cache in about 1 ms.
 
 ## Testing
 
