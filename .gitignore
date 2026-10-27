@@ -6,6 +6,11 @@
 # dotenv files
 .env
 
+# Local configuration and secrets that must not be committed
+appsettings.Production.json
+appsettings.Local.json
+secrets.json
+
 # User-specific files
 *.rsuser
 *.suo
