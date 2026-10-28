@@ -34,15 +34,16 @@ Estimates are in hours and include implementation and self-review of each task.
 | F5 | Done | Bulk status update with partial success; 140/140 automated tests. Bulk tests (part of T6.4) were done here |
 | F6 | Done (within F2–F5) | The test tasks were completed together with the features they test; 140 automated tests |
 | F7 | Done | `docs/performance.md`; read-only measurement scripts in `tools/perf` |
-| F8 | Done (pending review) | Angular client: list, filters, search, sorting, paging, summary, details, history, single and bulk status updates; 59 client tests |
-| F9 | In progress | README completed, AI usage section, clean-run verification (T9.1–T9.3). Publishing the repository (T9.4) is left to the author |
+| F8 | Done | Angular client: list, filters, search, sorting, paging, summary, details, history, single and bulk status updates; 62 client tests |
+| F9 | Done | README, AI usage section, clean-run verification, repository published on GitHub and verified from a fresh clone (T9.1–T9.4) |
 
 ### F9 results
 
 | Check | Result |
 |---|---|
-| Clean run (copy of the files tracked by git, without `bin`, `obj`, `node_modules`, `dist`) | `npm ci` reproduced `package-lock.json` exactly (Angular 19.2.25); client tests 59/59; client production build succeeded; `dotnet build` 0 warnings, 0 errors; `dotnet test` 140/140 |
-| Run instructions | `dotnet run --project RequestsManagement.Api` listened on `http://localhost:5114` with Swagger; `npm start` served `http://localhost:4200`; list and summary requests through the proxy returned 100,000 requests (read-only) |
+| Fresh clone of the published repository (2026-10-28) | Cloned from GitHub into a new folder; the files matched the local repository exactly. `npm ci` succeeded and left `package-lock.json` unchanged; client tests 59/59; client production build succeeded (238 kB initial); `dotnet build` 0 warnings, 0 errors; `dotnet test` 140/140. The main database was unchanged (same document count, indexes and `dbHash` of the `requests` collection before and after). The API and the dev server were not started from the clone |
+| Clean run (2026-10-26, copy of the files tracked by git, without `bin`, `obj`, `node_modules`, `dist`) | `npm ci` reproduced `package-lock.json` exactly (Angular 19.2.25); client tests 59/59; client production build succeeded; `dotnet build` 0 warnings, 0 errors; `dotnet test` 140/140 |
+| Run instructions (2026-10-26) | `dotnet run --project RequestsManagement.Api` listened on `http://localhost:5114` with Swagger; `npm start` served `http://localhost:4200`; list and summary requests through the proxy returned 100,000 requests (read-only) |
 | Generated files | `client/README.md` (Angular CLI template, superseded by the main README) removed; `client/.vscode` kept (debug and task settings for VS Code) |
 
 ### F8 results
@@ -52,8 +53,9 @@ Estimates are in hours and include implementation and self-review of each task.
 | Client tests (`ng test`, headless Chrome) | 59/59, no warnings |
 | Client build | Production build succeeded (238 kB initial, 69 kB transferred) |
 | Tests detect regressions | Replacing `switchMap` with `mergeMap`, removing the debounce, removing the `409` form lock, sending a fixed version, or removing the in-flight guard each made the corresponding tests fail |
-| Against the real API (read-only by the assistant; one manual write check by the author) | List, summary, filters and layout at desktop width and at a 390 px viewport. Bulk updates and the `409`/error flows were verified only by automated tests. Single status changes were also checked manually by the author (three changes on 2026-10-26). The assistant did not write to the main database. |
+| Against the real API | List, summary, filters and layout at desktop width and at a 390 px viewport. Single status changes were checked manually (three changes on 2026-10-26). Bulk updates and the `409`/error flows were verified only by automated tests. |
 | API unchanged | No API change; development uses the Angular dev-server proxy instead of CORS. Backend tests 140/140 |
+| Fix after the final review (2026-10-28) | A save that completed after another request was selected showed its result in the details panel of the new request. Three regression tests were added first and failed against the previous code (3 failed, 59 passed); after the fix in `request-details.component.ts`: 62/62, production build succeeded (238 kB initial) |
 
 ### F7 results
 

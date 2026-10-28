@@ -205,20 +205,37 @@ export class RequestDetailsComponent {
   }
 
   private onUpdated(updated: RequestDto): void {
+    // The page is told about every successful update, even when another request is displayed by now.
+    this.updated.emit(updated);
+    if (!this.isDisplayed(updated.id)) {
+      return;
+    }
+
     this.view.update(view => ({ ...view, request: updated }));
     this.target.set('');
     this.feedback.set({ kind: 'success', message: `Status changed to ${updated.status} (version ${updated.version}).` });
-    this.updated.emit(updated);
 
     this.api.getHistory(updated.id)
       .pipe(takeUntilDestroyed(this.destroyRef))
       .subscribe({
-        next: history => this.view.update(view => ({ ...view, history })),
-        error: () => this.feedback.set({ kind: 'error', message: 'The status was changed, but the history could not be reloaded.' })
+        next: history => {
+          if (this.isDisplayed(updated.id)) {
+            this.view.update(view => ({ ...view, history }));
+          }
+        },
+        error: () => {
+          if (this.isDisplayed(updated.id)) {
+            this.feedback.set({ kind: 'error', message: 'The status was changed, but the history could not be reloaded.' });
+          }
+        }
       });
   }
 
   private onUpdateFailed(id: string, error: unknown): void {
+    if (!this.isDisplayed(id)) {
+      return;
+    }
+
     if (!(error instanceof HttpErrorResponse)) {
       this.feedback.set({ kind: 'error', message: describeHttpError(error) });
       return;
@@ -238,6 +255,11 @@ export class RequestDetailsComponent {
         // 400 (validation or a disallowed transition), 503 and network errors.
         this.feedback.set({ kind: 'error', message: describeHttpError(error) });
     }
+  }
+
+  // The user may select another request while a save is in flight; its outcome is then not shown in this panel.
+  private isDisplayed(id: string): boolean {
+    return this.requestId() === id;
   }
 
   private describeLoadError(error: unknown): string {

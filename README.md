@@ -97,10 +97,11 @@ cd client && npx ng test --watch=false --browsers=ChromeHeadless   # client
 
 ### Verified clean run
 
-On 2026-10-26, a copy containing only the files tracked by git (no `bin`, `obj`, `node_modules` or `dist`) was set up
-from scratch: `npm ci`, the client tests (59 passed) and production build, `dotnet build` (0 warnings),
-`dotnet test` (140 passed), and the commands above (`dotnet run` and `npm start`, with list and summary requests
-through the proxy) all worked.
+On 2026-10-28, the published repository was cloned from GitHub into a new folder and set up from scratch:
+`npm ci`, the client tests (59 passed) and production build, `dotnet build` (0 warnings) and `dotnet test`
+(140 passed) all succeeded, and the main database was unchanged afterwards. The commands to start the API and the
+client (`dotnet run` and `npm start`, with list and summary requests through the proxy) were last verified on
+2026-10-26, from a copy of the files tracked by git.
 
 ## Solution structure
 
@@ -672,24 +673,26 @@ Otherwise the database is left in place and a message is written.
 **TTL tests do not wait.** They use a real `MemoryCache` with a manual clock (`MemoryCacheOptions.Clock`)
 that the test moves forward, so expiration is deterministic.
 
-**Result: 140 API tests passed** (latest run on 2026-10-26).
+**Result: 140 API tests passed** (latest run on 2026-10-28, from a fresh clone).
 
 ### Client tests
 
-59 tests, run with `npx ng test --watch=false --browsers=ChromeHeadless` (latest run on 2026-10-26: all passed).
+62 tests, run with `npx ng test --watch=false --browsers=ChromeHeadless` (latest run on 2026-10-28: all passed).
 HTTP is simulated with `HttpTestingController`; time is controlled with `fakeAsync`.
 
 | Test file | Covers |
 |---|---|
 | `requests-api.service.spec.ts` | Query parameters (empty filters omitted, search trimmed), URLs and id encoding, `PUT` body with `expectedVersion` and the `X-User-Name` header, `409` body passed through, bulk body and header |
 | `requests-page.component.spec.ts` | First page with default parameters; **search debounced (one request after 300 ms)**; **a request in flight is cancelled when the criteria change or a newer search starts (`switchMap`)**; back to page 1 on filter, sort or page-size changes; server-side sorting and paging; date range sent as half-open UTC; empty state with one-request "clear filters"; error state with retry; validation messages; opening details keeps the list; after an update the same page is reloaded and the summary refreshed; bulk selection count, clearing and reload |
-| `request-details.component.spec.ts` | Request and history loaded together, history in chronological order, empty history; only allowed targets offered; user name required; update sends the loaded version and the header; **`409` shows the current status and version, locks the form, is not retried, and "Reload" unlocks it**; `400`, `404` and `503`; a failed load; cancelling a load when another request is selected |
+| `request-details.component.spec.ts` | Request and history loaded together, history in chronological order, empty history; only allowed targets offered; user name required; update sends the loaded version and the header; **`409` shows the current status and version, locks the form, is not retried, and "Reload" unlocks it**; `400`, `404` and `503`; a failed load; cancelling a load when another request is selected; **the result of a save for a request that is no longer selected (success, `409`, reloaded history) is not shown in the panel, while the page is still notified of a successful update so the list and summary are reloaded** |
 | `bulk-status-bar.component.spec.ts` | Selected count; target status and user name required; policy hint; every id with its loaded version and the header are sent; **each item is shown as the server reported it, even though the response is HTTP 200**; no second request while one is in progress; a failed batch is reported as possibly partial (`503`), a validation error is not (`400`); results stay visible until dismissed |
 | `summary-panel.component.spec.ts` | Counts by status and priority; refresh keeps the previous counts visible; error with retry |
 | `requests-list.models.spec.ts`, `status-transitions.spec.ts`, `current-user.service.spec.ts`, `http-error.spec.ts`, `app.component.spec.ts` | Selection limited to 100; the UI copy of the transition policy; user name storage and validation; error messages; the app shell |
 
 The tests for debounce, cancellation, the version sent and the `409` lock were checked by temporarily breaking the
 code (for example replacing `switchMap` with `mergeMap`): each change made the corresponding tests fail.
+The three tests for a save that completes after another request was selected were written before the fix and
+failed against the previous code (3 failed, 59 passed); after the fix, all 62 passed.
 
 ## Angular client
 
@@ -782,9 +785,8 @@ The value is stored in the history but not written to the logs.
 - **Deep pages are slow** (`skip`): about 190 ms for page 2,500 over HTTP, against about 8 ms for the first page.
 - **No authentication or authorization**, and no CORS policy for a production deployment.
 - **Bulk selection covers the current page only** (up to 100 rows).
-- **The client's single status change was also exercised manually by the author** against the local database
-  (three status changes on 2026-10-26; the stored history and versions stayed consistent). The bulk update screen and
-  the `409`/error flows were verified with automated tests only.
+- **The bulk update screen and the `409`/error flows of the client were verified with automated tests only,**
+  not manually against the running API.
 
 **Possible improvements:**
 - **Keyset (cursor) pagination** for deep pages; measured with `explain` at 20 keys per page at every position
@@ -810,7 +812,7 @@ The project was developed with **Claude Code** (an AI coding assistant by Anthro
   no claims about tests that were not run.
 
 **What was checked, and what changed as a result:**
-- **Every reported result comes from an actual run** (builds, 140 API tests, 59 client tests, query plans, HTTP
+- **Every reported result comes from an actual run** (builds, 140 API tests, 62 client tests, query plans, HTTP
   latency). The results are recorded in the [work plan](docs/work-plan.md).
 - **Tests were checked against deliberately broken code** (for example, removing the version from the update filter,
   removing single-flight from the cache, removing the debounce): each change made the corresponding tests fail.

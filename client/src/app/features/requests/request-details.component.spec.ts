@@ -208,6 +208,59 @@ describe('RequestDetailsComponent', () => {
     http.expectOne('/api/requests/r2').flush(dto('r2', 'New', 1));
     http.expectOne('/api/requests/r2/history').flush([]);
   });
+
+  it('does not show a save result in another request that was selected while saving, but reports the update', () => {
+    open('r1', dto('r1', 'Waiting', 4));
+    signIn();
+    chooseAndSubmit('InProgress');
+    const put = http.expectOne('/api/requests/r1/status');
+
+    open('r2', dto('r2', 'New', 1));
+    put.flush(dto('r1', 'InProgress', 5));
+    fixture.detectChanges();
+
+    http.expectNone('/api/requests/r1/history');
+    expect(element.textContent).toContain('Request r2');
+    expect(element.textContent).not.toContain('Request r1');
+    expect(element.textContent).not.toContain('Status changed');
+    expect(updated.map(r => r.id)).toEqual(['r1']);
+  });
+
+  it('does not lock another request that was selected while a save ended in a conflict', () => {
+    open('r1', dto('r1', 'New', 1));
+    signIn();
+    chooseAndSubmit('InProgress');
+    const put = http.expectOne('/api/requests/r1/status');
+
+    open('r2', dto('r2', 'New', 1));
+    put.flush(
+      { status: 409, title: 'The request was changed by another update.', currentVersion: 2, currentStatus: 'InProgress' },
+      { status: 409, statusText: 'Conflict' });
+    fixture.detectChanges();
+
+    expect(element.querySelector('[role=alert]')).toBeNull();
+    const select = element.querySelector('form select') as HTMLSelectElement;
+    select.value = 'InProgress';
+    select.dispatchEvent(new Event('change'));
+    fixture.detectChanges();
+    expect(submitButton().disabled).toBeFalse();
+  });
+
+  it('does not show the reloaded history of a saved request after another request was selected', () => {
+    open('r1', dto('r1', 'Waiting', 4));
+    signIn();
+    chooseAndSubmit('InProgress');
+    http.expectOne('/api/requests/r1/status').flush(dto('r1', 'InProgress', 5));
+    const history = http.expectOne('/api/requests/r1/history');
+
+    open('r2', dto('r2', 'New', 1));
+    history.flush([change('Waiting', 'InProgress', '2026-10-26T10:00:00Z', 'dana.cohen')]);
+    fixture.detectChanges();
+
+    expect(element.textContent).toContain('Request r2');
+    expect(element.textContent).toContain('No status changes yet.');
+    expect(element.querySelector('.history')).toBeNull();
+  });
 });
 
 function dto(id: string, status: RequestStatus, version: number): RequestDto {
